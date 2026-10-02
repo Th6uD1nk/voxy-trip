@@ -25,10 +25,16 @@
       // Palette: Neon Cyber-Desert Canyon
       const COLOR_CANYON_SAND = 0xd97736
       const COLOR_CANYON_ROCK = 0x8b3a1a
-      const COLOR_NEON_CYAN = 0x00f3ff
-      const COLOR_NEON_MAGENTA = 0xff007f
-      const COLOR_NEON_AMBER = 0xffaa00
+      const COLOR_NEON_CYAN = 0x00f3ff      // Speed Booster Cube
+      const COLOR_NEON_LIME = 0x39ff14      // Jump Booster Cube (distinct from magenta/cyan)
+      const COLOR_NEON_MAGENTA = 0xff007f   // Warp Teleporter Cube
+      const COLOR_NEON_AMBER = 0xffaa00     // Start/HUD accents
       const COLOR_AVATAR = 0x00ffff
+
+      // Performance & Course tuning
+      const MIN_OBSTACLE_SPACING_ROWS = 10  // At least 10 clear rows between obstacle lines
+      const ACTIVE_WINDOW_BACK = 15.0       // Z units kept behind avatar
+      const ACTIVE_WINDOW_FRONT = 85.0      // Z units rendered ahead of avatar
     `,
 
     logic: {
@@ -44,17 +50,20 @@
       `,
 
       boost_mechanics: `
-        Three cubic power-up interactions:
-        1. Speed Booster (Cubic Accelerator block): grants temporary 1.35x speed boost and intensifies the particle trail.
-        2. Jump Booster (Cubic Spring block): imparts an instant SUPER_JUMP_FORCE (12.0) upward, launching the avatar over obstacles.
-        3. Warp Teleporter (Cubic Portal block): instantly teleports avatar forward within a strict bounded proximity radius of WARP_FORWARD_DISTANCE (10.0 units) and moderate height (+3.5 Y units), acting as a localized gap leap rather than skipping level sections.
+        Three cubic power-up interactions with distinct glowing neon materials:
+        1. Speed Booster (ID 5, Glowing Neon Cyan - COLOR_NEON_CYAN): grants temporary 1.35x speed boost and intensifies cyan particle trail.
+        2. Jump Booster (ID 6, Glowing Neon Lime - COLOR_NEON_LIME): imparts an instant SUPER_JUMP_FORCE (12.0) upward, launching avatar over chasm gaps.
+        3. Warp Teleporter (ID 7, Glowing Neon Magenta - COLOR_NEON_MAGENTA): instantly teleports avatar forward within a strict bounded proximity radius of WARP_FORWARD_DISTANCE (10.0 units) and moderate height (+3.5 Y units), acting as a localized gap leap.
+        VISUAL EXCLUSIVITY CONTRACT:
+        - Only bonus cubes (IDs 5, 6, 7) are floating, rotating, and emit luminous neon light.
+        - Obstacles (IDs 3, 4) MUST NEVER use neon or glowing emissive colors; they MUST remain matte canyon rock or dark basalt.
       `,
 
       cubic_particle_trail: `
         Continuous particle trail behind the avatar:
         1. Emits small cubic voxel particles from the avatar's base at regular sliding intervals.
         2. Particles inherit a fraction of the avatar's velocity, shrink over a brief lifespan (~0.6s), and fade out.
-        3. Particle color shifts dynamically: cyan during normal sliding, magenta during speed boost, amber during warp/airborne.
+        3. Particle color shifts dynamically: cyan during normal sliding, magenta during speed boost, lime/amber during warp/airborne.
       `,
 
       synthetic_audio_synthesis: `
@@ -72,10 +81,15 @@
         Structured 5-phase downhill level progression lasting at least 35 to 50 seconds:
         - Total length MUST BE at least 350 rows of terrain blocks.
         - Phase 1: Initiation Slope (~70 rows: wide 12-block track, gentle downhill gradient, introductory speed booster).
-        - Phase 2: Narrow Canyon Chasm (~80 rows: track narrows to 6 blocks, canyon walls rise, scattered rock obstacles to dodge).
-        - Phase 3: Minefield Alley (~80 rows: alternating speed boosters and explosive mine hazards requiring quick lateral weaving).
+        - Phase 2: Narrow Canyon Chasm (~80 rows: track narrows to 6 blocks, canyon walls rise, spaced rock boulders to steer around).
+        - Phase 3: Minefield Alley (~80 rows: alternating speed boosters and dark basalt mines requiring lateral slalom).
         - Phase 4: The Great Abyss Leap (~60 rows: track breaks into a canyon gap; an airborne Warp Teleporter launches the player across the chasm).
         - Phase 5: Final Downhill Sprint (~70 rows: steepest descent, jump booster pads to clear terminal hazards, leading into the neon finish line gate).
+
+        STRICT NAVIGABILITY & SPACING RULES:
+        1. MINIMUM SPACING: Obstacle rows MUST BE separated by at least MIN_OBSTACLE_SPACING_ROWS (10) clear rows to allow reaction time at 14.0 speed.
+        2. NAVIGABLE PATH: Every row containing obstacles MUST leave at least 2 adjacent columns open as a safe sliding lane. Wall-to-wall obstacle barricades are strictly forbidden.
+        3. OBSTACLE DENSITY: A row MUST NEVER contain more than 2 obstacle blocks simultaneously.
       `,
 
       neon_canyon_aesthetic: `
@@ -89,18 +103,35 @@
 
       portable_level_format: `
         STRICT
-        Engine-agnostic level description format:
-        The course is encoded as a pure 2D/3D array of tile symbols completely decoupled from Three.js:
+        Engine-agnostic declarative level configuration:
+        The level is defined as an explicit, serializable configuration object declared at the start of the script:
+        const LEVEL_CONFIG = {
+          name: "Neon Canyon Descent",
+          width: 12,
+          total_rows: 360,
+          slope_profile: [...], // Array of downhill slope deltas per section
+          grid: [...]           // Array of rows containing integer tile IDs
+        };
+
+        Tile ID encoding:
           0 = Pit / Void (no floor)
           1 = Standard canyon sand track voxel
           2 = Downhill slope ramp voxel
-          3 = Solid canyon rock boulder (fatal collision)
-          4 = Explosive mine block (explodes on contact)
-          5 = Speed Booster Cube (temporary acceleration)
-          6 = Jump Booster Cube (high vertical bounce)
-          7 = Warp Teleporter Cube (forward & aerial teleportation)
-          8 = Start Gate
-          9 = Finish Gate
+          3 = Solid canyon rock boulder (fatal collision, matte COLOR_CANYON_ROCK)
+          4 = Dark basalt explosive mine (fatal collision, matte dark 0x221111, NO neon glow)
+          5 = Speed Booster Cube (glowing COLOR_NEON_CYAN)
+          6 = Jump Booster Cube (glowing COLOR_NEON_LIME)
+          7 = Warp Teleporter Cube (glowing COLOR_NEON_MAGENTA)
+          8 = Start Gate (neon arch)
+          9 = Finish Gate (neon arch)
+      `,
+
+      rendering_optimizations: `
+        STRICT HARDWARE PERFORMANCE RULES:
+        1. INSTANCING: All floor voxels, canyon wall voxels, guardrails, and items MUST BE grouped into THREE.InstancedMesh objects (or batched) rather than creating separate individual THREE.Mesh instances for each item.
+        2. ACTIVE Z WINDOW: Entities, collision tests, and dynamic updates outside the range [avatar.z - ACTIVE_WINDOW_BACK, avatar.z + ACTIVE_WINDOW_FRONT] MUST BE skipped or culled.
+        3. FRUSTUM CULLING & CHUNKING: Long voxel arrays (floors, walls) SHOULD BE partitioned into Z-chunks (e.g. 50 rows per chunk) with native Three.js bounding box frustum culling enabled, preventing the GPU from rendering offscreen geometry.
+        4. SHADOW MAP BUDGET: Directional sunlight shadow map MUST NOT exceed 1024x1024 resolution and MUST focus tightly on the active sliding area around the avatar. Decorative background cliff blocks MUST NOT cast shadows.
       `
     },
 
@@ -121,6 +152,10 @@
       strictThreeKeysOnly:      `the keyboard event listener MUST ONLY handle ArrowLeft, ArrowRight, and ArrowUp, and MUST NEVER bind Space, A, D, or any letter keys`,
       speedLimitsConstraint:    `forward sliding velocity MUST NEVER exceed 14.0 units per second`,
       courseLengthConstraint:   `the level array MUST contain at least 350 rows of terrain to prevent premature stage completion`,
+      navigableCourseRule:      `obstacle rows MUST BE separated by at least 10 clear rows, leave at least 2 adjacent columns open, and never exceed 2 obstacles per row`,
+      nonHazardousNeonRule:     `glowing neon emissive materials MUST BE strictly reserved for bonus cubes (IDs 5, 6, 7), while obstacles (IDs 3, 4) MUST BE strictly non-emissive matte canyon rock or dark basalt`,
+      renderingOptimizationRule:`the renderer MUST use InstancedMesh grouping, restrict updates to an active Z window, and limit shadow map budget to 1024x1024`,
+      declarativeLevelConfig:   `the track data MUST BE structured as an explicit declarative LEVEL_CONFIG object cleanly decoupled from rendering`,
       standaloneBundle:         `the final web deliverable MUST BE a single self-contained HTML document`
     }
   },
@@ -153,8 +188,12 @@
             obligations: {
               lighting: `MUST configure directional sunlight casting soft shadows on stepped voxel canyon cliffs`,
               palette:  `MUST render stepped canyon terrain in terracotta/orange tones with glowing cyan and magenta accents`
+            },
+            constraints: {
+              shadow_budget: `directional sunlight shadow map MUST NOT exceed 1024x1024 with an orthographic frustum closely tracking the avatar`
             }
           },
+          tests: ["catalog.tests.renderingOptimizationRule"],
           blueprints: ["catalog.logic.neon_canyon_aesthetic"]
         },
 
@@ -163,9 +202,11 @@
           inputs: [`browser animation frame`],
           rules: {
             obligations: {
-              delta_time: `all kinematics, gravity, and particle lifespans MUST BE scaled by frame delta time`
+              delta_time:    `all kinematics, gravity, and particle lifespans MUST BE scaled by frame delta time`,
+              active_window: `physics collision queries and interactive item updates MUST BE bounded to the active Z window to guarantee sustained 60 FPS`
             }
-          }
+          },
+          tests: ["catalog.tests.renderingOptimizationRule"]
         }
       }
     },
@@ -198,16 +239,20 @@
           inputs: [`stage initialization`],
           rules: {
             obligations: {
-              serializable: `MUST encode track using engine-agnostic tile IDs (0 to 9)`,
-              five_phases:  `course MUST implement the 5 structured phases defined in catalog.logic.level_1_course_design ending in finish gate ID 9`
+              serializable:       `MUST encode track using engine-agnostic tile IDs (0 to 9)`,
+              declarative_config: `MUST declare course structure via an explicit portable LEVEL_CONFIG object cleanly decoupled from Three.js scene code`,
+              five_phases:        `course MUST implement the 5 structured phases defined in catalog.logic.level_1_course_design ending in finish gate ID 9`
             },
             constraints: {
-              min_length: `the track array MUST contain at least 350 sequential rows of terrain to provide an immersive 35 to 50 seconds run`
+              min_length:            `the track array MUST contain at least 350 sequential rows of terrain to provide an immersive 35 to 50 seconds run`,
+              navigability_spacing:  `obstacle rows MUST BE separated by at least MIN_OBSTACLE_SPACING_ROWS (10) clear rows, MUST leave at least 2 open columns on any row, and MUST NEVER generate impassable wall-to-wall obstacle barricades`
             }
           },
           tests: [
             "catalog.tests.portableLevelFormat",
-            "catalog.tests.courseLengthConstraint"
+            "catalog.tests.declarativeLevelConfig",
+            "catalog.tests.courseLengthConstraint",
+            "catalog.tests.navigableCourseRule"
           ],
           blueprints: [
             "catalog.logic.portable_level_format",
@@ -216,7 +261,7 @@
         },
 
         voxel_geometry: {
-          description: `instanced or merged cubic mesh generation for track floor, canyon wall steps, and decorative voxel formations`,
+          description: `instanced cubic mesh generation for track floor, canyon wall steps, guardrails, and items with performance acceleration`,
           inputs: [`level_data loaded`],
           depends_on: [
             {
@@ -226,14 +271,19 @@
           ],
           rules: {
             obligations: {
-              pure_cubes: `all terrain elements MUST BE constructed strictly from sharp cubic voxels (VOXEL_SIZE)`
+              pure_cubes:    `all terrain elements MUST BE constructed strictly from sharp cubic voxels (VOXEL_SIZE)`,
+              optimizations: `MUST group voxels into THREE.InstancedMesh structures and apply active Z-windowing or chunked frustum culling as defined in catalog.logic.rendering_optimizations`
             }
           },
-          tests: ["catalog.tests.pureCubicAesthetic"]
+          tests: [
+            "catalog.tests.pureCubicAesthetic",
+            "catalog.tests.renderingOptimizationRule"
+          ],
+          blueprints: ["catalog.logic.rendering_optimizations"]
         },
 
         bonus_cubes: {
-          description: `floating, rotating cubic power-ups on the track: Speed Booster (Cyan), Jump Booster (Magenta), and Warp Teleporter (Amber)`,
+          description: `floating, rotating glowing cubic power-ups on the track: Speed Booster (Cyan), Jump Booster (Lime), and Warp Teleporter (Magenta)`,
           inputs: [`character intersection`],
           depends_on: [
             {
@@ -244,20 +294,29 @@
           rules: {
             obligations: {
               item_visuals: `bonus items MUST BE floating glowing cubes with continuous gentle rotation`,
-              cube_types:   `MUST implement Speed Booster (ID 5), Jump Booster (ID 6), and Warp Teleporter (ID 7)`
+              cube_types:   `MUST implement Speed Booster (ID 5, glowing Cyan), Jump Booster (ID 6, glowing Lime), and Warp Teleporter (ID 7, glowing Magenta)`
+            },
+            constraints: {
+              neon_exclusivity: `glowing neon emissive materials are strictly reserved for bonus cubes (IDs 5, 6, 7) so players instantly recognize beneficial power-ups`
             }
           },
+          tests: ["catalog.tests.nonHazardousNeonRule"],
           blueprints: ["catalog.logic.boost_mechanics"]
         },
 
         hazards: {
-          description: `deadly obstacles: solid rock boulders, abyss pits, and explosive cubic mines`,
+          description: `deadly obstacles: solid rock boulders, abyss pits, and dark basalt mines`,
           inputs: [`character collision`],
           rules: {
             obligations: {
-              mine_explosion: `colliding with a mine MUST trigger an explosive radial scatter of voxel debris particles and fail stage`
+              mine_explosion:  `colliding with a mine MUST trigger an explosive radial scatter of voxel debris particles and fail stage`,
+              matte_aesthetic: `obstacles (rock boulders ID 3, mines ID 4) MUST BE rendered with matte, non-emissive canyon stone or dark basalt materials and MUST NEVER use neon or glowing colors`
+            },
+            constraints: {
+              zero_neon_glow: `obstacles MUST NEVER possess glowing or neon shaders to eliminate visual confusion with bonus cubes`
             }
-          }
+          },
+          tests: ["catalog.tests.nonHazardousNeonRule"]
         }
       }
     },
