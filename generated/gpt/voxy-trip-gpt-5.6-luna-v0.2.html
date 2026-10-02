@@ -1,0 +1,974 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Voxy Trip — Neon Canyon Descent</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#090711;font-family:monospace;touch-action:none}
+body{position:relative}
+#game{position:fixed;inset:0}
+#hud{position:fixed;top:18px;left:20px;z-index:5;color:#ffb000;text-shadow:0 0 8px #ff6a00,0 0 18px #ff007f;font-weight:700;letter-spacing:.12em;font-size:18px;pointer-events:none}
+#state{position:fixed;inset:0;z-index:6;display:flex;align-items:center;justify-content:center;text-align:center;color:#fff;pointer-events:none;text-shadow:0 0 12px #00f3ff}
+#state .panel{padding:22px 28px;border:1px solid rgba(0,243,255,.5);background:rgba(5,3,18,.45);box-shadow:0 0 30px rgba(0,243,255,.18)}
+#state .title{font-size:30px;letter-spacing:.18em;color:#00f3ff}
+#state .sub{margin-top:10px;font-size:13px;line-height:1.7;color:#fff}
+#touch{position:fixed;inset:0;z-index:4;display:none}
+.touchZone{position:absolute;top:0;bottom:0;width:50%}
+#touchLeft{left:0}
+#touchRight{right:0}
+@media (pointer:coarse){#touch{display:block}}
+canvas{display:block}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+<div id="game"></div>
+<div id="hud">TIME 00:00.00</div>
+<div id="state">
+  <div class="panel">
+    <div class="title">VOXY TRIP</div>
+    <div class="sub" id="stateText">ARROW KEYS / TOUCH<br>PRESS ARROW UP OR TAP TO START</div>
+  </div>
+</div>
+<div id="touch"><div id="touchLeft" class="touchZone"></div><div id="touchRight" class="touchZone"></div></div>
+
+<script>
+'use strict';
+
+/* Portable, renderer-independent level data. */
+const VOXEL_SIZE = 1.0;
+const GRAVITY = 16.0;
+const BASE_SLIDE_SPEED = 7.0;
+const MAX_SLIDE_SPEED = 14.0;
+const JUMP_FORCE = 6.5;
+const SUPER_JUMP_FORCE = 12.0;
+const BOOST_MULTIPLIER = 1.35;
+const BOOST_DURATION = 2.0;
+const WARP_FORWARD_DISTANCE = 10.0;
+const WARP_ALTITUDE_BOOST = 3.5;
+const STEER_SPEED = 13.0;
+const STEER_DAMPING = 0.86;
+const CAMERA_DISTANCE = 5.5;
+const CAMERA_HEIGHT = 4.2;
+const CAMERA_LERP = 0.1;
+const COLOR_CANYON_SAND = 0xd97736;
+const COLOR_CANYON_ROCK = 0x8b3a1a;
+const COLOR_NEON_CYAN = 0x00f3ff;
+const COLOR_NEON_LIME = 0x39ff14;
+const COLOR_NEON_MAGENTA = 0xff007f;
+const COLOR_NEON_AMBER = 0xffaa00;
+const COLOR_AVATAR = 0x00ffff;
+const TRACK_WIDTH = 12;
+const W = 12;
+const MIN_OBSTACLE_SPACING_ROWS = 10;
+const ACTIVE_WINDOW_BACK = 15.0;
+const ACTIVE_WINDOW_FRONT = 85.0;
+
+const LEVEL_CONFIG = {
+  name: "Neon Canyon Descent",
+  width: 12,
+  total_rows: 360,
+  slope_profile: [0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.045, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.065, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.085, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.105, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120, 0.120],
+  grid: [
+    [2, 2, 2, 2, 2, 2, 8, 2, 2, 2, 2, 2],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [2, 2, 2, 2, 2, 2, 5, 2, 2, 2, 2, 2],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 5, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0],
+    [0, 0, 0, 1, 1, 3, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 3, 1, 1, 1, 3, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 3, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 3, 1, 3, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 3, 1, 3, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 3, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 2, 2, 2, 2, 2, 2, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 5, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 4, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 4, 4, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 5, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 4, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 4, 1, 1, 4, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 5, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 4, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 4, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 5, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 4, 1, 1, 1, 1, 4, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 7, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 1, 1, 1, 1, 6, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0],
+    [0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 5, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 2, 2, 2, 2, 2, 6, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 4, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 2, 2, 2, 2, 2, 5, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 6, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 2, 2, 2, 2, 2, 2, 4, 4, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 5, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 6, 1, 1, 1, 1, 0],
+    [0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 4, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 5, 1, 1, 1, 1, 0],
+    [0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 6, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 4, 1, 1, 4, 1, 0],
+    [0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 9, 1, 1, 1, 1, 0]
+  ]
+};
+
+/* Three.js and scene setup. */
+const mount = document.getElementById('game');
+const hud = document.getElementById('hud');
+const stateOverlay = document.getElementById('state');
+const stateText = document.getElementById('stateText');
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x120c24, 0.012);
+
+const camera = new THREE.PerspectiveCamera(58, innerWidth / innerHeight, 0.1, 180);
+const renderer = new THREE.WebGLRenderer({antialias:true, powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+mount.appendChild(renderer.domElement);
+
+const ambient = new THREE.HemisphereLight(0xffd2a8, 0x130b1e, 1.15);
+scene.add(ambient);
+
+const sun = new THREE.DirectionalLight(0xffb36b, 2.0);
+sun.castShadow = true;
+sun.shadow.mapSize.width = 1024;
+sun.shadow.mapSize.height = 1024;
+sun.shadow.camera.left = -18;
+sun.shadow.camera.right = 18;
+sun.shadow.camera.top = 22;
+sun.shadow.camera.bottom = -18;
+sun.shadow.camera.near = 1;
+sun.shadow.camera.far = 55;
+scene.add(sun);
+
+const sky = new THREE.Mesh(
+  new THREE.SphereGeometry(120, 16, 8),
+  new THREE.MeshBasicMaterial({color:0x160b28, side:THREE.BackSide})
+);
+scene.add(sky);
+
+const cubeGeo = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+const smallCubeGeo = new THREE.BoxGeometry(0.55,0.55,0.55);
+
+const sandMat = new THREE.MeshStandardMaterial({color:COLOR_CANYON_SAND, roughness:.95, metalness:0});
+const rampMat = new THREE.MeshStandardMaterial({color:0xb65a29, roughness:.95, metalness:0});
+const rockMat = new THREE.MeshStandardMaterial({color:COLOR_CANYON_ROCK, roughness:1, metalness:0});
+const basaltMat = new THREE.MeshStandardMaterial({color:0x221111, roughness:1, metalness:0});
+const guardMat = new THREE.MeshStandardMaterial({color:COLOR_NEON_CYAN, emissive:COLOR_NEON_CYAN, emissiveIntensity:0.45, roughness:.5});
+const cyanMat = new THREE.MeshStandardMaterial({color:COLOR_NEON_CYAN, emissive:COLOR_NEON_CYAN, emissiveIntensity:2.2, roughness:.25});
+const limeMat = new THREE.MeshStandardMaterial({color:COLOR_NEON_LIME, emissive:COLOR_NEON_LIME, emissiveIntensity:2.2, roughness:.25});
+const magentaMat = new THREE.MeshStandardMaterial({color:COLOR_NEON_MAGENTA, emissive:COLOR_NEON_MAGENTA, emissiveIntensity:2.2, roughness:.25});
+const visorMat = new THREE.MeshStandardMaterial({color:COLOR_AVATAR, emissive:COLOR_AVATAR, emissiveIntensity:2.2});
+const avatarBaseMat = new THREE.MeshStandardMaterial({color:0x12212c, roughness:.7, metalness:.15});
+
+/* Deterministic row height, fully derived from portable data. */
+function rowY(row) {
+  let y = 0;
+  for (let i=0;i<row;i++) y -= LEVEL_CONFIG.slope_profile[i];
+  return y;
+}
+function rowWidth(row) {
+  let r = LEVEL_CONFIG.grid[row];
+  let min = W, max = -1;
+  for (let c=0;c<W;c++) if (r[c] !== 0) { min=Math.min(min,c); max=Math.max(max,c); }
+  return max < 0 ? 0 : max-min+1;
+}
+function rowStart(row) {
+  let r = LEVEL_CONFIG.grid[row];
+  let min = W;
+  for (let c=0;c<W;c++) if (r[c] !== 0) min=Math.min(min,c);
+  return min===W ? 0 : min;
+}
+
+/* Instanced voxel world. */
+const terrainGroup = new THREE.Group();
+scene.add(terrainGroup);
+
+const floorRows = [];
+const wallRows = [];
+const obstacleRows = [];
+const bonusItems = [];
+const itemByType = {5:[],6:[],7:[]};
+
+let floorCount = 0;
+let wallCount = 0;
+let rockCount = 0;
+let mineCount = 0;
+let bonusCount = 0;
+
+for (let r=0;r<LEVEL_CONFIG.total_rows;r++) {
+  const row = LEVEL_CONFIG.grid[r];
+  for (let c=0;c<W;c++) {
+    const id = row[c];
+    if (id===1 || id===2) floorCount++;
+    if (id===3) rockCount++;
+    if (id===4) mineCount++;
+    if ((id===5 || id===6 || id===7)) bonusCount++;
+  }
+  if (r===0 || r===359) floorCount += 0;
+  const width = rowWidth(r);
+  if (width>0) wallCount += 4;
+}
+
+const floorMesh = new THREE.InstancedMesh(cubeGeo, sandMat, Math.max(1,floorCount));
+const rampMesh = new THREE.InstancedMesh(cubeGeo, rampMat, Math.max(1,floorCount));
+const rockMesh = new THREE.InstancedMesh(cubeGeo, rockMat, Math.max(1,rockCount));
+const mineMesh = new THREE.InstancedMesh(cubeGeo, basaltMat, Math.max(1,mineCount));
+const leftGuardMesh = new THREE.InstancedMesh(cubeGeo, guardMat, Math.max(1,wallCount));
+const rightGuardMesh = new THREE.InstancedMesh(cubeGeo, guardMat, Math.max(1,wallCount));
+const cyanMesh = new THREE.InstancedMesh(smallCubeGeo, cyanMat, Math.max(1,bonusCount));
+const limeMesh = new THREE.InstancedMesh(smallCubeGeo, limeMat, Math.max(1,bonusCount));
+const magentaMesh = new THREE.InstancedMesh(smallCubeGeo, magentaMat, Math.max(1,bonusCount));
+
+floorMesh.castShadow = floorMesh.receiveShadow = true;
+rampMesh.castShadow = rampMesh.receiveShadow = true;
+rockMesh.castShadow = rockMesh.receiveShadow = true;
+mineMesh.castShadow = mineMesh.receiveShadow = true;
+leftGuardMesh.castShadow = rightGuardMesh.castShadow = false;
+cyanMesh.castShadow = limeMesh.castShadow = magentaMesh.castShadow = false;
+
+terrainGroup.add(floorMesh,rampMesh,rockMesh,mineMesh,leftGuardMesh,rightGuardMesh,cyanMesh,limeMesh,magentaMesh);
+
+const dummy = new THREE.Object3D();
+const floorRefs = [];
+const obstacleRefs = [];
+let fi=0, ri=0, mi=0, gi=0;
+const bonusMeshes = {5:cyanMesh,6:limeMesh,7:magentaMesh};
+const bonusCounters = {5:0,6:0,7:0};
+
+for (let r=0;r<LEVEL_CONFIG.total_rows;r++) {
+  const row=LEVEL_CONFIG.grid[r], y=rowY(r);
+  const width=rowWidth(r), start=rowStart(r);
+  for (let c=0;c<W;c++) {
+    const id=row[c];
+    const x=(c-(W-1)/2)*VOXEL_SIZE;
+    const z=r*VOXEL_SIZE;
+    if (id===1) {
+      dummy.position.set(x,y-0.5,z); dummy.rotation.set(0,0,0); dummy.scale.set(1,1,1);
+      dummy.updateMatrix(); floorMesh.setMatrixAt(fi,dummy.matrix);
+      floorRefs.push({row:r,col:c,id:1,index:fi,y});
+      fi++;
+    } else if (id===2) {
+      dummy.position.set(x,y-0.5,z); dummy.rotation.set(0,0,0); dummy.scale.set(1,1,1);
+      dummy.updateMatrix(); rampMesh.setMatrixAt(fi,dummy.matrix);
+      floorRefs.push({row:r,col:c,id:2,index:fi,y});
+      fi++;
+    } else if (id===3 || id===4) {
+      const mesh=id===3?rockMesh:mineMesh;
+      dummy.position.set(x,y-0.5,z); dummy.rotation.set(0,0,0); dummy.scale.set(1,1,1);
+      dummy.updateMatrix(); mesh.setMatrixAt(id===3?ri:mi,dummy.matrix);
+      obstacleRefs.push({row:r,col:c,id,index:id===3?ri:mi,y,mesh});
+      if(id===3)ri++; else mi++;
+    } else if (id===5 || id===6 || id===7) {
+      const idx=bonusCounters[id]++;
+      const mesh=bonusMeshes[id];
+      dummy.position.set(x,y+1.0,z); dummy.rotation.set(0.25*r,0.35*r,0.18*r); dummy.scale.set(1,1,1);
+      dummy.updateMatrix(); mesh.setMatrixAt(idx,dummy.matrix);
+      const item={row:r,col:c,id,index:idx,y:y+1.0,active:true,phase:r*0.17};
+      bonusItems.push(item); itemByType[id].push(item);
+    }
+  }
+  if(width>0) {
+    const left=start-1, right=start+width;
+    if(left>=0) {
+      dummy.position.set((left-(W-1)/2),y-0.5,r); dummy.rotation.set(0,0,0); dummy.scale.set(1,1,1);
+      dummy.updateMatrix(); leftGuardMesh.setMatrixAt(gi++,dummy.matrix);
+    }
+    if(right<W) {
+      dummy.position.set((right-(W-1)/2),y-0.5,r); dummy.rotation.set(0,0,0); dummy.scale.set(1,1,1);
+      dummy.updateMatrix(); rightGuardMesh.setMatrixAt(gi++,dummy.matrix);
+    }
+  }
+}
+floorMesh.instanceMatrix.needsUpdate=true;
+rampMesh.instanceMatrix.needsUpdate=true;
+rockMesh.instanceMatrix.needsUpdate=true;
+mineMesh.instanceMatrix.needsUpdate=true;
+leftGuardMesh.instanceMatrix.needsUpdate=true;
+rightGuardMesh.instanceMatrix.needsUpdate=true;
+cyanMesh.instanceMatrix.needsUpdate=true;
+limeMesh.instanceMatrix.needsUpdate=true;
+magentaMesh.instanceMatrix.needsUpdate=true;
+
+/* Start/finish gates are cubic voxel arches. */
+function addGate(row,color) {
+  const group=new THREE.Group();
+  const y=rowY(row)+1.5, z=row;
+  const mat=new THREE.MeshStandardMaterial({color,emissive:color,emissiveIntensity:1.8});
+  for(const x of [-3,3]) {
+    const m=new THREE.Mesh(cubeGeo,mat); m.position.set(x,y,z); group.add(m);
+    const m2=new THREE.Mesh(cubeGeo,mat); m2.position.set(x,y+1,z); group.add(m2);
+  }
+  const top=new THREE.Mesh(cubeGeo,mat); top.scale.set(7,1,1); top.position.set(0,y+2,z); group.add(top);
+  scene.add(group);
+}
+addGate(0,COLOR_NEON_AMBER);
+addGate(359,COLOR_NEON_MAGENTA);
+
+/* Cubic avatar. */
+const avatar=new THREE.Group();
+const avatarBase=new THREE.Mesh(new THREE.BoxGeometry(1,1,1),avatarBaseMat);
+avatarBase.position.y=0;
+avatar.add(avatarBase);
+const visor=new THREE.Mesh(new THREE.BoxGeometry(.72,.24,.16),visorMat);
+visor.position.set(0,.15,.48);
+avatar.add(visor);
+scene.add(avatar);
+
+/* Particle trail: pooled cubic meshes, continuously emitted while moving. */
+const trailGroup=new THREE.Group(); scene.add(trailGroup);
+const trailParticles=[];
+const TRAIL_POOL=90;
+for(let i=0;i<TRAIL_POOL;i++) {
+  const mat=new THREE.MeshBasicMaterial({color:COLOR_NEON_CYAN,transparent:true,opacity:0});
+  const p=new THREE.Mesh(new THREE.BoxGeometry(.22,.22,.22),mat);
+  p.visible=false; trailGroup.add(p);
+  trailParticles.push({mesh:p,life:0,max:.6,vx:0,vy:0,vz:0});
+}
+let trailCursor=0, trailAccumulator=0;
+
+function emitTrail() {
+  const p=trailParticles[trailCursor++%TRAIL_POOL];
+  p.mesh.visible=true;
+  p.mesh.position.copy(avatar.position);
+  p.mesh.position.y-=.42;
+  p.life=.6; p.max=.6;
+  p.vx=state.steerVelocity*.08;
+  p.vy=0.8+Math.random()*0.7;
+  p.vz=-state.speed*.18;
+  p.mesh.scale.setScalar(.7+Math.random()*.35);
+}
+function updateTrail(dt) {
+  trailAccumulator+=dt;
+  if(state.status==='SLIDING' && trailAccumulator>.045) { trailAccumulator=0; emitTrail(); }
+  for(const p of trailParticles) if(p.life>0) {
+    p.life-=dt;
+    p.mesh.position.x+=p.vx*dt;
+    p.mesh.position.y+=p.vy*dt;
+    p.mesh.position.z+=p.vz*dt;
+    p.vy-=GRAVITY*.18*dt;
+    p.mesh.material.opacity=Math.max(0,p.life/p.max)*.65;
+    p.mesh.material.color.setHex(state.boostTimer>0?COLOR_NEON_MAGENTA:(state.airborne?COLOR_NEON_AMBER:COLOR_NEON_CYAN));
+    p.mesh.scale.multiplyScalar(Math.pow(.05,dt/.6));
+    if(p.life<=0)p.mesh.visible=false;
+  }
+}
+
+/* Procedural Web Audio only: OscillatorNode, BiquadFilterNode, AudioBufferSourceNode. */
+let audioCtx=null, windGain=null, windFilter=null, windSource=null, noiseBuffer=null;
+function initAudio() {
+  if(audioCtx) { if(audioCtx.state==='suspended') audioCtx.resume(); return; }
+  audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  const n=audioCtx.sampleRate*2;
+  noiseBuffer=audioCtx.createBuffer(1,n,audioCtx.sampleRate);
+  const data=noiseBuffer.getChannelData(0);
+  for(let i=0;i<n;i++) data[i]=Math.random()*2-1;
+  windSource=audioCtx.createBufferSource();
+  windSource.buffer=noiseBuffer; windSource.loop=true;
+  windFilter=audioCtx.createBiquadFilter(); windFilter.type='bandpass'; windFilter.Q.value=1.2;
+  windGain=audioCtx.createGain(); windGain.gain.value=.0001;
+  windSource.connect(windFilter).connect(windGain).connect(audioCtx.destination);
+  windSource.start();
+}
+function toneSweep(start,end,duration,type='sine',gain=.09) {
+  if(!audioCtx)return;
+  const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+  o.type=type; o.frequency.setValueAtTime(start,audioCtx.currentTime);
+  o.frequency.exponentialRampToValueAtTime(Math.max(1,end),audioCtx.currentTime+duration);
+  g.gain.setValueAtTime(gain,audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(.0001,audioCtx.currentTime+duration);
+  o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime+duration+.02);
+}
+function boostSound() {
+  if(!audioCtx)return;
+  [440,880].forEach((f,i)=>setTimeout(()=>toneSweep(f,f*1.01,.25,'triangle',.1),i*110));
+}
+function jumpSound() { toneSweep(200,650,.12,'sine',.12); }
+function warpSound() {
+  if(!audioCtx)return;
+  const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  o.type='sine'; o.frequency.setValueAtTime(800,audioCtx.currentTime);
+  o.frequency.exponentialRampToValueAtTime(200,audioCtx.currentTime+.28);
+  o.connect(g).connect(audioCtx.destination); g.gain.setValueAtTime(.1,audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(.0001,audioCtx.currentTime+.28);
+  o.start(); o.stop(audioCtx.currentTime+.3);
+}
+function explosionSound() {
+  if(!audioCtx)return;
+  const s=audioCtx.createBufferSource(),g=audioCtx.createGain(),f=audioCtx.createBiquadFilter();
+  const n=audioCtx.sampleRate*.4,b=audioCtx.createBuffer(1,n,audioCtx.sampleRate),d=b.getChannelData(0);
+  for(let i=0;i<n;i++)d[i]=Math.random()*2-1;
+  s.buffer=b; f.type='lowpass'; f.frequency.value=80;
+  g.gain.setValueAtTime(.22,audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(.0001,audioCtx.currentTime+.4);
+  s.connect(f).connect(g).connect(audioCtx.destination); s.start();
+}
+function victorySound() {
+  if(!audioCtx)return;
+  [523.25,659.25,783.99,1046.5].forEach((f,i)=>setTimeout(()=>toneSweep(f,f,.35,'square',.08),i*120));
+}
+function updateWind() {
+  if(!audioCtx||!windFilter||!windGain)return;
+  const cutoff=400+(state.speed/MAX_SLIDE_SPEED)*1400;
+  windFilter.frequency.setTargetAtTime(cutoff,audioCtx.currentTime,.05);
+  windGain.gain.setTargetAtTime(state.status==='SLIDING'?.035:.0001,audioCtx.currentTime,.08);
+}
+
+/* Input: only ArrowLeft, ArrowRight, ArrowUp are registered. */
+const input={left:false,right:false};
+function startOrRestart() {
+  initAudio();
+  if(state.status==='READY'||state.status==='CRASHED'||state.status==='CLEARED') resetRun();
+  if(state.status==='READY') state.status='SLIDING';
+}
+function triggerJump() {
+  initAudio();
+  if(state.status==='READY'||state.status==='CRASHED'||state.status==='CLEARED') { resetRun(); state.status='SLIDING'; return; }
+  if(state.status==='SLIDING' && !state.airborne) {
+    state.vy=JUMP_FORCE; state.airborne=true; jumpSound();
+  }
+}
+addEventListener('keydown',e=>{
+  if(e.key==='ArrowLeft'){input.left=true;e.preventDefault();}
+  else if(e.key==='ArrowRight'){input.right=true;e.preventDefault();}
+  else if(e.key==='ArrowUp'){triggerJump();e.preventDefault();}
+});
+addEventListener('keyup',e=>{
+  if(e.key==='ArrowLeft'){input.left=false;e.preventDefault();}
+  else if(e.key==='ArrowRight'){input.right=false;e.preventDefault();}
+});
+let touchStartX=0,touchStartY=0,touchMoved=false;
+addEventListener('touchstart',e=>{
+  initAudio();
+  const t=e.changedTouches[0]; touchStartX=t.clientX; touchStartY=t.clientY; touchMoved=false;
+  if(e.touches.length>=2) triggerJump();
+  else if(state.status==='READY'||state.status==='CRASHED'||state.status==='CLEARED') startOrRestart();
+},{passive:false});
+addEventListener('touchmove',e=>{
+  const t=e.changedTouches[0]; const dx=t.clientX-touchStartX, dy=t.clientY-touchStartY;
+  touchMoved=true;
+  input.left=dx<-18; input.right=dx>18;
+  if(dy<-40) triggerJump();
+  e.preventDefault();
+},{passive:false});
+addEventListener('touchend',e=>{input.left=input.right=false;e.preventDefault();},{passive:false});
+
+/* Gameplay state. */
+const state={
+  status:'READY',speed:BASE_SLIDE_SPEED,steerVelocity:0,vy:0,airborne:false,
+  boostTimer:0,elapsed:0,lastRow:0
+};
+function resetRun() {
+  state.status='READY'; state.speed=BASE_SLIDE_SPEED; state.steerVelocity=0; state.vy=0;
+  state.airborne=false; state.boostTimer=0; state.elapsed=0; state.lastRow=0;
+  avatar.position.set(0,rowY(0)+1.1,0);
+  avatar.rotation.set(0,0,0);
+  for(const item of bonusItems) item.active=true;
+  for(const mesh of [cyanMesh,limeMesh,magentaMesh]) {
+    for(let i=0;i<mesh.count;i++) {
+      // Reconstructing active matrices from source items keeps pickup consumption local.
+      mesh.setMatrixAt(i,new THREE.Matrix4());
+    }
+    mesh.instanceMatrix.needsUpdate=true;
+  }
+  for(const item of bonusItems) {
+    const mesh=bonusMeshes[item.id];
+    dummy.position.set((item.col-(W-1)/2),item.y,item.row);
+    dummy.rotation.set(.25*item.row,.35*item.row,.18*item.row);
+    dummy.scale.set(1,1,1); dummy.updateMatrix(); mesh.setMatrixAt(item.index,dummy.matrix);
+  }
+  for(const mesh of [cyanMesh,limeMesh,magentaMesh]) mesh.instanceMatrix.needsUpdate=true;
+  stateOverlay.style.display='flex';
+  stateText.innerHTML='ARROW KEYS / TOUCH<br>PRESS ARROW UP OR TAP TO START';
+}
+function crash() {
+  if(state.status!=='SLIDING')return;
+  state.status='CRASHED'; explosionSound();
+  stateOverlay.style.display='flex';
+  stateText.textContent='CRASHED — ARROW UP OR TAP TO RESTART';
+}
+function win() {
+  if(state.status!=='SLIDING')return;
+  state.status='CLEARED'; victorySound();
+  stateOverlay.style.display='flex';
+  stateText.textContent='FINISH — TIME '+formatTime(state.elapsed)+' — ARROW UP OR TAP TO RESTART';
+}
+function formatTime(t) {
+  const m=Math.floor(t/60), s=Math.floor(t%60), cs=Math.floor((t%1)*100);
+  return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0')+'.'+String(cs).padStart(2,'0');
+}
+function currentRow() { return Math.max(0,Math.min(359,Math.floor(avatar.position.z))); }
+function groundAt(z,x) {
+  const r=Math.max(0,Math.min(359,Math.floor(z)));
+  const row=LEVEL_CONFIG.grid[r], col=Math.round(x+(W-1)/2);
+  if(col<0||col>=W||row[col]===0)return null;
+  return rowY(r)+0.55;
+}
+function activeBounds() {
+  return [Math.max(0,avatar.position.z-ACTIVE_WINDOW_BACK),Math.min(359,avatar.position.z+ACTIVE_WINDOW_FRONT)];
+}
+function pickupTest() {
+  const [lo,hi]=activeBounds();
+  for(const item of bonusItems) {
+    if(!item.active||item.row<lo||item.row>hi)continue;
+    const ix=item.col-(W-1)/2;
+    if(Math.abs(avatar.position.x-ix)<.72 && Math.abs(avatar.position.z-item.row)<.72 && Math.abs(avatar.position.y-item.y)<1.2) {
+      item.active=false;
+      const mesh=bonusMeshes[item.id];
+      dummy.position.set(0,-999,0); dummy.rotation.set(0,0,0); dummy.scale.set(0,0,0); dummy.updateMatrix();
+      mesh.setMatrixAt(item.index,dummy.matrix); mesh.instanceMatrix.needsUpdate=true;
+      if(item.id===5){state.boostTimer=BOOST_DURATION; boostSound();}
+      else if(item.id===6){state.vy=SUPER_JUMP_FORCE;state.airborne=true;jumpSound();}
+      else if(item.id===7){avatar.position.z=Math.min(avatar.position.z+WARP_FORWARD_DISTANCE,359.2);avatar.position.y+=WARP_ALTITUDE_BOOST;state.vy+=0;state.airborne=true;warpSound();}
+    }
+  }
+}
+function hazardTest() {
+  const [lo,hi]=activeBounds();
+  for(const o of obstacleRefs) {
+    if(o.row<lo||o.row>hi)continue;
+    const ox=o.col-(W-1)/2;
+    if(Math.abs(avatar.position.x-ox)<.78 && Math.abs(avatar.position.z-o.row)<.62 && Math.abs(avatar.position.y-(o.y+.2))<1.3) { crash(); return; }
+  }
+  const r=currentRow(), ground=groundAt(avatar.position.z,avatar.position.x);
+  if(ground===null && avatar.position.y<rowY(r)-12) crash();
+}
+function updatePhysics(dt) {
+  if(state.status!=='SLIDING')return;
+  state.elapsed+=dt;
+  const r=currentRow();
+  state.lastRow=r;
+
+  const downhill=LEVEL_CONFIG.slope_profile[Math.min(r,359)];
+  const target=Math.min(MAX_SLIDE_SPEED,BASE_SLIDE_SPEED+downhill*55);
+  state.speed += (target-state.speed)*Math.min(1,dt*1.8);
+  if(state.boostTimer>0) {
+    state.boostTimer-=dt;
+    state.speed=Math.min(MAX_SLIDE_SPEED,Math.max(state.speed,BASE_SLIDE_SPEED*BOOST_MULTIPLIER));
+  }
+  state.speed=Math.min(MAX_SLIDE_SPEED,state.speed);
+
+  const steer=(input.right?1:0)-(input.left?1:0);
+  state.steerVelocity += steer*STEER_SPEED*dt;
+  state.steerVelocity *= Math.pow(STEER_DAMPING,dt*60);
+  state.steerVelocity=Math.max(-STEER_SPEED,Math.min(STEER_SPEED,state.steerVelocity));
+  avatar.position.x += state.steerVelocity*dt;
+  avatar.position.x=Math.max(-5.15,Math.min(5.15,avatar.position.x));
+
+  avatar.position.z += state.speed*dt;
+
+  const ground=groundAt(avatar.position.z,avatar.position.x);
+  if(ground!==null && !state.airborne && avatar.position.y<=ground+0.45) {
+    avatar.position.y += (ground+0.45-avatar.position.y)*Math.min(1,dt*14);
+    state.vy=0;
+  } else {
+    state.airborne=true;
+    state.vy-=GRAVITY*dt;
+    avatar.position.y+=state.vy*dt;
+    if(ground!==null && avatar.position.y<=ground+0.45 && state.vy<=0) {
+      avatar.position.y=ground+0.45; state.vy=0; state.airborne=false;
+    }
+  }
+
+  avatar.rotation.z += ((-state.steerVelocity*.035)-avatar.rotation.z)*Math.min(1,dt*10);
+
+  pickupTest();
+  hazardTest();
+  if(avatar.position.z>=358.5) win();
+}
+function updateBonuses(time) {
+  const [lo,hi]=activeBounds();
+  for(const item of bonusItems) {
+    if(!item.active||item.row<lo||item.row>hi)continue;
+    const mesh=bonusMeshes[item.id];
+    dummy.position.set(item.col-(W-1)/2,item.y+Math.sin(time*3+item.phase)*.18,item.row);
+    dummy.rotation.set(.25+time*.6+item.phase,.35+time*.9+item.phase,.18+time*.45);
+    dummy.scale.set(1,1,1); dummy.updateMatrix(); mesh.setMatrixAt(item.index,dummy.matrix);
+  }
+  cyanMesh.instanceMatrix.needsUpdate=limeMesh.instanceMatrix.needsUpdate=magentaMesh.instanceMatrix.needsUpdate=true;
+}
+function updateCamera(dt) {
+  const r=currentRow();
+  const slope=LEVEL_CONFIG.slope_profile[r]||.05;
+  const pitch=THREE.MathUtils.degToRad(THREE.MathUtils.clamp(45+slope*95,45,60));
+  const pull=THREE.MathUtils.clamp(CAMERA_DISTANCE+slope*7,5.0,6.5);
+  const height=THREE.MathUtils.clamp(CAMERA_HEIGHT-slope*2,3.2,5.0);
+  const target=new THREE.Vector3(avatar.position.x,avatar.position.y+0.2,avatar.position.z);
+  const desired=new THREE.Vector3(
+    avatar.position.x,
+    avatar.position.y+height,
+    avatar.position.z-pull
+  );
+  camera.position.lerp(desired,1-Math.pow(1-CAMERA_LERP,dt*60));
+  const lookTarget=target.clone();
+  lookTarget.z+=Math.cos(pitch)*3.0;
+  lookTarget.y-=Math.sin(pitch)*2.2;
+  camera.lookAt(lookTarget);
+  const dx=camera.position.x-avatar.position.x, dy=camera.position.y-avatar.position.y, dz=camera.position.z-avatar.position.z;
+  const dist=Math.sqrt(dx*dx+dy*dy+dz*dz);
+  if(dist>6.5) camera.position.lerp(target.clone().add(new THREE.Vector3(0,3.5,-4.5)),.5);
+  camera.position.y=Math.min(5.0,camera.position.y);
+  sun.position.set(avatar.position.x+10,avatar.position.y+18,avatar.position.z-12);
+  sun.target.position.copy(avatar.position);
+}
+function updateHud() { hud.textContent='TIME '+formatTime(state.elapsed); }
+
+/* Active-window culling: entire long-range groups are rendered normally, while collision/dynamic work is bounded. */
+function updateChunkVisibility() {
+  const [lo,hi]=activeBounds();
+  const visibleZMin=lo-20, visibleZMax=hi+20;
+  for(const group of [floorMesh,rampMesh,rockMesh,mineMesh,leftGuardMesh,rightGuardMesh]) group.visible=true;
+  // InstancedMesh data remains grouped; interactive tests and dynamic item updates are strictly active-windowed.
+  for(const item of bonusItems) {
+    item.inActiveWindow=item.row>=lo&&item.row<=hi;
+  }
+  sun.shadow.camera.position.copy(camera.position);
+  sun.shadow.camera.updateProjectionMatrix();
+}
+let last=performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt=Math.min(.033,(now-last)/1000); last=now;
+  const time=now/1000;
+  updatePhysics(dt);
+  updateTrail(dt);
+  updateBonuses(time);
+  updateCamera(dt);
+  updateChunkVisibility();
+  updateHud();
+  updateWind();
+  renderer.render(scene,camera);
+}
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+resetRun();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

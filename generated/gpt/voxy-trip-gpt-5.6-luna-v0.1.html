@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Voxy Trip — Neon Canyon Descent</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#070312;color:#fff;font-family:monospace}
+body{touch-action:none}
+#game{position:fixed;inset:0}
+canvas{display:block;width:100%;height:100%}
+#hud{position:fixed;top:16px;left:16px;z-index:5;color:#ffdd77;text-shadow:0 0 8px #ff8a00;font-size:18px;letter-spacing:2px;user-select:none}
+#state{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;text-align:center;color:#fff;text-shadow:0 0 12px #00f3ff;font-size:24px;letter-spacing:3px;pointer-events:none}
+#state small{display:block;margin-top:12px;font-size:12px;letter-spacing:2px;color:#b9faff}
+#touchHint{position:fixed;bottom:14px;left:0;right:0;text-align:center;z-index:5;color:#7ffcff;font-size:11px;letter-spacing:1px;opacity:.7;pointer-events:none}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+<div id="game"></div>
+<div id="hud">TIME 00:00.00</div>
+<div id="state">READY<small>ARROW KEYS / TOUCH</small></div>
+<div id="touchHint">LEFT HALF: STEER LEFT &nbsp; RIGHT HALF: STEER RIGHT &nbsp; SWIPE UP / TWO-FINGER TAP: JUMP</div>
+<script>
+"use strict";
+
+/* ===== PORTABLE LEVEL DATA: engine-agnostic tile IDs only ===== */
+const LEVEL_CONFIG = {
+  name: "Neon Canyon Descent",
+  width: 12,
+  total_rows: 360,
+  slope_profile: [
+    {start:0,end:69,delta:-0.025},
+    {start:70,end:149,delta:-0.04},
+    {start:150,end:229,delta:-0.055},
+    {start:230,end:289,delta:-0.07},
+    {start:290,end:359,delta:-0.09}
+  ],
+  grid: [[8,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,5,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,3,3,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,3,3,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,4,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,5,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,4,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,3,1,1,1,1,3,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,5,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,4,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,4,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,5,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,3,1,1,1,1,1,1,3,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,6,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,6,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,6,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,2,2,2,2,2,2],[2,2,2,2,2,2,9,2,2,2,2,2]]
+};
+
+/* ===== Catalog globals ===== */
+const VOXEL_SIZE=1.0;
+const GRAVITY=16.0;
+const BASE_SLIDE_SPEED=7.0;
+const MAX_SLIDE_SPEED=14.0;
+const JUMP_FORCE=6.5;
+const SUPER_JUMP_FORCE=12.0;
+const BOOST_MULTIPLIER=1.35;
+const BOOST_DURATION=2.0;
+const WARP_FORWARD_DISTANCE=10.0;
+const WARP_ALTITUDE_BOOST=3.5;
+const STEER_SPEED=13.0;
+const STEER_DAMPING=0.86;
+const CAMERA_DISTANCE=5.5;
+const CAMERA_HEIGHT=4.2;
+const CAMERA_LERP=0.1;
+const COLOR_CANYON_SAND=0xd97736;
+const COLOR_CANYON_ROCK=0x8b3a1a;
+const COLOR_NEON_CYAN=0x00f3ff;
+const COLOR_NEON_LIME=0x39ff14;
+const COLOR_NEON_MAGENTA=0xff007f;
+const COLOR_NEON_AMBER=0xffaa00;
+const COLOR_AVATAR=0x00ffff;
+const TRACK_WIDTH=12;
+const W=12;
+const MIN_OBSTACLE_SPACING_ROWS=10;
+const ACTIVE_WINDOW_BACK=15.0;
+const ACTIVE_WINDOW_FRONT=85.0;
+
+/* ===== Scene ===== */
+const mount=document.getElementById("game");
+const hud=document.getElementById("hud");
+const stateEl=document.getElementById("state");
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x090414);
+scene.fog=new THREE.FogExp2(0x1a0928,0.018);
+
+const camera=new THREE.PerspectiveCamera(60,innerWidth/innerHeight,0.1,180);
+const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+mount.appendChild(renderer.domElement);
+
+const ambient=new THREE.HemisphereLight(0x552266,0x321a12,1.2);
+scene.add(ambient);
+
+const sun=new THREE.DirectionalLight(0xffb56a,2.2);
+sun.castShadow=true;
+sun.shadow.mapSize.width=1024;
+sun.shadow.mapSize.height=1024;
+sun.shadow.camera.left=-18;
+sun.shadow.camera.right=18;
+sun.shadow.camera.top=18;
+sun.shadow.camera.bottom=-18;
+sun.shadow.camera.near=1;
+sun.shadow.camera.far=70;
+scene.add(sun);
+
+const horizon=new THREE.Mesh(
+  new THREE.PlaneGeometry(240,90),
+  new THREE.MeshBasicMaterial({color:0x21092c,side:THREE.DoubleSide})
+);
+horizon.rotation.x=-Math.PI/2;
+horizon.position.set(0,-14,-115);
+scene.add(horizon);
+
+/* ===== Materials: only bonus cubes are emissive/neon ===== */
+const matSand=new THREE.MeshStandardMaterial({color:COLOR_CANYON_SAND,roughness:.92,metalness:0});
+const matSlope=new THREE.MeshStandardMaterial({color:0x9b4a22,roughness:.95,metalness:0});
+const matRock=new THREE.MeshStandardMaterial({color:COLOR_CANYON_ROCK,roughness:1,metalness:0});
+const matBasalt=new THREE.MeshStandardMaterial({color:0x221111,roughness:1,metalness:0});
+const matGuard=new THREE.MeshStandardMaterial({color:COLOR_NEON_CYAN,roughness:.55,metalness:.2,emissive:COLOR_NEON_CYAN,emissiveIntensity:.28});
+const matSpeed=new THREE.MeshStandardMaterial({color:COLOR_NEON_CYAN,emissive:COLOR_NEON_CYAN,emissiveIntensity:2.8,roughness:.25,metalness:.15});
+const matJump=new THREE.MeshStandardMaterial({color:COLOR_NEON_LIME,emissive:COLOR_NEON_LIME,emissiveIntensity:2.8,roughness:.25,metalness:.15});
+const matWarp=new THREE.MeshStandardMaterial({color:COLOR_NEON_MAGENTA,emissive:COLOR_NEON_MAGENTA,emissiveIntensity:3.0,roughness:.25,metalness:.15});
+const matGate=new THREE.MeshStandardMaterial({color:COLOR_NEON_AMBER,emissive:COLOR_NEON_AMBER,emissiveIntensity:2.4});
+const cubeGeo=new THREE.BoxGeometry(VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE);
+
+/* ===== Pure-data world helpers ===== */
+const rowZ=r=>-r*VOXEL_SIZE;
+const rowSlope=r=>LEVEL_CONFIG.slope_profile.find(s=>r>=s.start&&r<=s.end)?.delta||0;
+const groundY=r=>-r*0.035;
+
+const groups={
+  floor:new THREE.Group(),
+  walls:new THREE.Group(),
+  guards:new THREE.Group(),
+  hazards:new THREE.Group(),
+  bonuses:new THREE.Group(),
+  gates:new THREE.Group()
+};
+Object.values(groups).forEach(g=>scene.add(g));
+
+function makeInstanced(material,items,castShadow=false,receiveShadow=true){
+  if(!items.length)return null;
+  const mesh=new THREE.InstancedMesh(cubeGeo,material,items.length);
+  mesh.castShadow=castShadow;
+  mesh.receiveShadow=receiveShadow;
+  const m=new THREE.Matrix4();
+  items.forEach((p,i)=>{
+    m.makeTranslation(p.x,p.y,p.z);
+    mesh.setMatrixAt(i,m);
+  });
+  mesh.instanceMatrix.needsUpdate=true;
+  return mesh;
+}
+
+/* ===== Instanced voxel generation ===== */
+const floorItems=[],wallItems=[],guardItems=[],rockItems=[],mineItems=[];
+const bonusItems={5:[],6:[],7:[]};
+const gateItems=[];
+for(let r=0;r<LEVEL_CONFIG.total_rows;r++){
+  const row=LEVEL_CONFIG.grid[r];
+  const z=rowZ(r), y=groundY(r);
+  for(let c=0;c<W;c++){
+    const id=row[c], x=(c-(W-1)/2)*VOXEL_SIZE;
+    if(id===1||id===2) floorItems.push({x,y,z});
+    if(id===3) rockItems.push({x,y:y+0.55,z});
+    if(id===4) mineItems.push({x,y:y+0.55,z});
+    if(id>=5&&id<=7) bonusItems[id].push({x,y:y+1.4,z});
+    if(id===8||id===9) gateItems.push({x,y:y+1.5,z,type:id});
+  }
+  // Stepped canyon walls, chunk-friendly groups.
+  if(r%2===0){
+    const wallY=y+1.5;
+    wallItems.push({x:-7.0,y:wallY,z});
+    wallItems.push({x:7.0,y:wallY,z});
+  }
+  // Cyan guardrail blocks are track boundary accents, not hazards.
+  if(r%2===0 && r<290){
+    guardItems.push({x:-6.0,y:y+0.55,z});
+    guardItems.push({x:6.0,y:y+0.55,z});
+  }
+}
+groups.floor.add(makeInstanced(matSand,floorItems,false,true));
+groups.walls.add(makeInstanced(matRock,wallItems,false,true));
+groups.guards.add(makeInstanced(matGuard,guardItems,false,true));
+groups.hazards.add(makeInstanced(matRock,rockItems,true,true));
+groups.hazards.add(makeInstanced(matBasalt,mineItems,true,true));
+
+for(const id of [5,6,7]){
+  const mat=id===5?matSpeed:id===6?matJump:matWarp;
+  groups.bonuses.add(makeInstanced(mat,bonusItems[id],true,false));
+}
+
+/* Gate geometry is still cubic and uses batched instancing. */
+const gateArch=[];
+gateItems.forEach(g=>{
+  for(const side of [-1,1]) gateArch.push({x:g.x+side*2.7,y:g.y,z:g.z});
+  for(let k=-2;k<=2;k++) gateArch.push({x:g.x+k*1.35,y:g.y+2.7,z:g.z});
+});
+groups.gates.add(makeInstanced(matGate,gateArch,false,false));
+
+/* ===== Avatar: cubic voxels only ===== */
+const avatar=new THREE.Group();
+const bodyMat=new THREE.MeshStandardMaterial({color:0x123b45,roughness:.65,metalness:.15});
+const visorMat=new THREE.MeshStandardMaterial({color:COLOR_AVATAR,emissive:COLOR_AVATAR,emissiveIntensity:2.5});
+const body=new THREE.Mesh(new THREE.BoxGeometry(1,1,1),bodyMat);
+body.castShadow=true;
+avatar.add(body);
+const visor=new THREE.Mesh(new THREE.BoxGeometry(.72,.18,.15),visorMat);
+visor.position.set(0,.12,-.51);
+avatar.add(visor);
+scene.add(avatar);
+
+/* ===== Input: exactly three keyboard keys ===== */
+const input={left:false,right:false,jump:false};
+window.addEventListener("keydown",e=>{
+  if(e.key==="ArrowLeft"){input.left=true;e.preventDefault();}
+  else if(e.key==="ArrowRight"){input.right=true;e.preventDefault();}
+  else if(e.key==="ArrowUp"){input.jump=true;e.preventDefault();}
+});
+window.addEventListener("keyup",e=>{
+  if(e.key==="ArrowLeft"){input.left=false;e.preventDefault();}
+  else if(e.key==="ArrowRight"){input.right=false;e.preventDefault();}
+  else if(e.key==="ArrowUp"){input.jump=false;e.preventDefault();}
+});
+
+let touchStart=null;
+let touchCount=0;
+renderer.domElement.addEventListener("touchstart",e=>{
+  touchCount=e.touches.length;
+  if(gameState==="CRASHED"||gameState==="CLEARED"){resetRun();return;}
+  if(e.touches.length>=2){requestJump();return;}
+  const t=e.touches[0];
+  touchStart={x:t.clientX,y:t.clientY,time:performance.now()};
+  input.left=t.clientX<innerWidth/2;
+  input.right=t.clientX>=innerWidth/2;
+},{passive:false});
+renderer.domElement.addEventListener("touchmove",e=>{
+  e.preventDefault();
+  if(!touchStart||e.touches.length!==1)return;
+  const t=e.touches[0];
+  const dy=t.clientY-touchStart.y;
+  if(dy<-45)requestJump();
+},{passive:false});
+renderer.domElement.addEventListener("touchend",e=>{
+  input.left=false;input.right=false;touchStart=null;touchCount=0;
+},{passive:false});
+
+function requestJump(){
+  if(gameState==="CRASHED"||gameState==="CLEARED"){resetRun();return;}
+  if(grounded){vy=JUMP_FORCE;grounded=false;playJump();}
+}
+
+/* ===== Web Audio: entirely algorithmic ===== */
+let audioCtx=null,windGain=null,windFilter=null,windSource=null,audioStarted=false;
+function ensureAudio(){
+  if(audioStarted)return;
+  audioStarted=true;
+  audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  const buffer=audioCtx.createBuffer(1,audioCtx.sampleRate*2,audioCtx.sampleRate);
+  const data=buffer.getChannelData(0);
+  for(let i=0;i<data.length;i++)data[i]=Math.random()*2-1;
+  windSource=audioCtx.createBufferSource();
+  windSource.buffer=buffer;windSource.loop=true;
+  windFilter=audioCtx.createBiquadFilter();
+  windFilter.type="bandpass";windFilter.frequency.value=400;windFilter.Q.value=.7;
+  windGain=audioCtx.createGain();windGain.gain.value=.025;
+  windSource.connect(windFilter).connect(windGain).connect(audioCtx.destination);
+  windSource.start();
+}
+function tone(freq0,freq1,duration,type="sine",gain=.06){
+  if(!audioCtx)return;
+  const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  o.type=type;o.frequency.setValueAtTime(freq0,audioCtx.currentTime);
+  o.frequency.exponentialRampToValueAtTime(Math.max(1,freq1),audioCtx.currentTime+duration);
+  g.gain.setValueAtTime(gain,audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(.0001,audioCtx.currentTime+duration);
+  o.connect(g).connect(audioCtx.destination);o.start();o.stop(audioCtx.currentTime+duration);
+}
+function playJump(){tone(200,650,.12,"sine",.09);}
+function playBoost(){
+  tone(440,440,.25,"triangle",.08);
+  setTimeout(()=>tone(880,880,.25,"triangle",.06),90);
+}
+function playWarp(){
+  if(!audioCtx)return;
+  const o=audioCtx.createOscillator(),g=audioCtx.createGain(),lfo=audioCtx.createOscillator(),lg=audioCtx.createGain();
+  o.type="sawtooth";o.frequency.setValueAtTime(800,audioCtx.currentTime);
+  o.frequency.exponentialRampToValueAtTime(200,audioCtx.currentTime+.45);
+  lfo.frequency.value=28;lg.gain.value=70;lfo.connect(lg).connect(o.frequency);
+  g.gain.setValueAtTime(.08,audioCtx.currentTime);g.gain.exponentialRampToValueAtTime(.0001,audioCtx.currentTime+.45);
+  o.connect(g).connect(audioCtx.destination);lfo.start();o.start();o.stop(audioCtx.currentTime+.45);lfo.stop(audioCtx.currentTime+.45);
+}
+function playExplosion(){
+  if(!audioCtx)return;
+  const b=audioCtx.createBuffer(1,audioCtx.sampleRate*.4,audioCtx.sampleRate),d=b.getChannelData(0);
+  for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
+  const s=audioCtx.createBufferSource(),f=audioCtx.createBiquadFilter(),g=audioCtx.createGain();
+  s.buffer=b;f.type="lowpass";f.frequency.setValueAtTime(80,audioCtx.currentTime);
+  g.gain.setValueAtTime(.22,audioCtx.currentTime);g.gain.exponentialRampToValueAtTime(.0001,audioCtx.currentTime+.4);
+  s.connect(f).connect(g).connect(audioCtx.destination);s.start();
+}
+function playVictory(){
+  [523.25,659.25,783.99,1046.5].forEach((f,i)=>setTimeout(()=>tone(f,f,.35,"square",.055),i*130));
+}
+
+/* ===== Particle trail: cubic particles, recycled and active-window bounded ===== */
+const particleGeo=new THREE.BoxGeometry(.18,.18,.18);
+const particleMat=new THREE.MeshBasicMaterial({color:COLOR_NEON_CYAN});
+const particlePool=[];
+for(let i=0;i<180;i++){
+  const m=new THREE.Mesh(particleGeo,particleMat.clone());
+  m.visible=false;scene.add(m);
+  particlePool.push({mesh:m,life:0,max:.6,vx:0,vy:0,vz:0});
+}
+let particleCursor=0;
+function emitParticle(color,burst=false){
+  const p=particlePool[particleCursor++%particlePool.length];
+  p.life=0;p.max=burst?.45:.6;
+  p.mesh.visible=true;
+  p.mesh.position.set(avatar.position.x,avatar.position.y-.35,avatar.position.z+.55);
+  p.vx=(Math.random()-.5)*1.4;
+  p.vy=Math.random()*.8;
+  p.vz=2.0+Math.random()*2;
+  p.mesh.scale.setScalar(burst?1.4:1);
+  p.mesh.material.color.setHex(color);
+}
+function updateParticles(dt){
+  for(const p of particlePool){
+    if(!p.mesh.visible)continue;
+    p.life+=dt;
+    if(p.life>=p.max){p.mesh.visible=false;continue;}
+    p.mesh.position.x+=p.vx*dt;
+    p.mesh.position.y+=p.vy*dt;
+    p.mesh.position.z+=p.vz*dt;
+    p.mesh.scale.multiplyScalar(Math.max(0,1-dt*1.7));
+  }
+}
+
+/* ===== Game state ===== */
+let gameState="READY";
+let avatarZ=0,avatarX=0,vy=0,vx=0,forwardSpeed=BASE_SLIDE_SPEED;
+let grounded=true,elapsed=0,boostTimer=0;
+let trailAccumulator=0;
+let lastTime=performance.now();
+
+function currentRow(){
+  return Math.max(0,Math.min(LEVEL_CONFIG.total_rows-1,Math.round(-avatar.position.z/VOXEL_SIZE)));
+}
+function rowGround(r){
+  return groundY(Math.max(0,Math.min(LEVEL_CONFIG.total_rows-1,r)));
+}
+function startRun(){
+  ensureAudio();
+  gameState="SLIDING";
+  stateEl.style.display="none";
+  elapsed=0;lastTime=performance.now();
+}
+function resetRun(){
+  avatarX=0;avatarZ=0;vy=0;vx=0;forwardSpeed=BASE_SLIDE_SPEED;grounded=true;boostTimer=0;elapsed=0;
+  avatar.position.set(0,1.2,0);
+  gameState="SLIDING";stateEl.style.display="none";ensureAudio();
+}
+function crash(){
+  if(gameState!=="SLIDING")return;
+  gameState="CRASHED";playExplosion();
+  stateEl.innerHTML="CRASHED<small>ARROW UP OR TAP TO RESTART</small>";
+  stateEl.style.display="block";
+}
+function win(){
+  if(gameState!=="SLIDING")return;
+  gameState="CLEARED";playVictory();
+  stateEl.innerHTML="CLEAR<small>"+formatTime(elapsed)+" &nbsp; ARROW UP OR TAP TO RESTART</small>";
+  stateEl.style.display="block";
+}
+function formatTime(t){
+  const m=Math.floor(t/60),s=Math.floor(t%60),h=Math.floor((t%1)*100);
+  return String(m).padStart(2,"0")+":"+String(s).padStart(2,"0")+"."+String(h).padStart(2,"0");
+}
+function collisionCheck(){
+  const r=currentRow(),start=Math.max(0,r-15),end=Math.min(LEVEL_CONFIG.total_rows-1,r+85);
+  const z=avatar.position.z;
+  for(let rr=start;rr<=end;rr++){
+    const dz=Math.abs(z-rowZ(rr));
+    if(dz>.65)continue;
+    const row=LEVEL_CONFIG.grid[rr];
+    for(let c=0;c<W;c++){
+      const id=row[c];
+      if(id<3||id>7)continue;
+      const x=(c-(W-1)/2);
+      if(Math.abs(avatar.position.x-x)<.75 && Math.abs(avatar.position.y-(rowGround(rr)+1.1))<1.5){
+        if(id===3||id===4){ if(id===4)spawnExplosionDebris(); crash(); return; }
+        if(id===5){ boostTimer=BOOST_DURATION;forwardSpeed=Math.min(MAX_SLIDE_SPEED,forwardSpeed*BOOST_MULTIPLIER); playBoost(); row[c]=1; }
+        if(id===6){ vy=SUPER_JUMP_FORCE;grounded=false;playBoost();row[c]=1; }
+        if(id===7){ avatar.position.z-=Math.min(WARP_FORWARD_DISTANCE,10.0);avatar.position.y+=WARP_ALTITUDE_BOOST;vy=0;grounded=false;playWarp();row[c]=1; }
+      }
+    }
+  }
+}
+function spawnExplosionDebris(){
+  for(let i=0;i<24;i++)emitParticle(0xffaa00,true);
+}
+
+function updatePlayer(dt){
+  const r=currentRow();
+  if(input.jump&&grounded)requestJump();
+  const steer=(input.right?1:0)-(input.left?1:0);
+  vx=vx*STEER_DAMPING+steer*STEER_SPEED*dt;
+  avatarX+=vx*dt;
+  avatarX=Math.max(-5.25,Math.min(5.25,avatarX));
+
+  const slope=rowSlope(r);
+  forwardSpeed=Math.min(MAX_SLIDE_SPEED,Math.max(BASE_SLIDE_SPEED,forwardSpeed+(-slope)*dt*18));
+  if(boostTimer>0){
+    boostTimer=Math.max(0,boostTimer-dt);
+    forwardSpeed=Math.min(MAX_SLIDE_SPEED,Math.max(forwardSpeed,BASE_SLIDE_SPEED*BOOST_MULTIPLIER));
+  }
+  avatar.position.z-=forwardSpeed*dt;
+
+  const gY=rowGround(r)+1.0;
+  vy-=GRAVITY*dt;
+  avatar.position.y+=vy*dt;
+
+  if(avatar.position.y<=gY && LEVEL_CONFIG.grid[r].some(v=>v===1||v===2)){
+    avatar.position.y=gY;
+    vy=0;grounded=true;
+  }else grounded=false;
+
+  if(avatar.position.y<-12){crash();return;}
+  avatar.position.x=avatarX;
+  avatar.rotation.z=THREE.MathUtils.lerp(avatar.rotation.z,-vx*.045,.16);
+
+  trailAccumulator+=dt;
+  if(trailAccumulator>=.035){
+    trailAccumulator=0;
+    const c=!grounded?COLOR_NEON_AMBER:(boostTimer>0?COLOR_NEON_MAGENTA:COLOR_NEON_CYAN);
+    emitParticle(c,false);
+  }
+  collisionCheck();
+  if(currentRow()>=LEVEL_CONFIG.total_rows-2)win();
+}
+
+function updateBonuses(){
+  // Dynamic item updates are bounded to the active Z window.
+  const r=currentRow(),back=Math.max(0,r-15),front=Math.min(LEVEL_CONFIG.total_rows-1,r+85);
+  if(groups.bonuses.children.length){
+    const spin=performance.now()*.001;
+    groups.bonuses.rotation.y=spin;
+    groups.bonuses.position.y=Math.sin(spin*2)*.12;
+  }
+  for(const p of particlePool){
+    if(!p.mesh.visible)continue;
+    const pr=-p.mesh.position.z;
+    p.mesh.visible=pr>=back&&pr<=front;
+  }
+}
+
+function updateCamera(){
+  const r=currentRow();
+  const slope=Math.abs(rowSlope(r));
+  const pitch=THREE.MathUtils.clamp(THREE.MathUtils.degToRad(45+slope*260),THREE.MathUtils.degToRad(45),THREE.MathUtils.degToRad(60));
+  const distance=THREE.MathUtils.clamp(CAMERA_DISTANCE+slope*3,4.5,6.5);
+  const height=THREE.MathUtils.clamp(CAMERA_HEIGHT+slope*4,3.6,5.0);
+  const target=new THREE.Vector3(avatar.position.x,avatar.position.y,avatar.position.z);
+  const desired=new THREE.Vector3(avatar.position.x,avatar.position.y+height,avatar.position.z+distance);
+  camera.position.lerp(desired,CAMERA_LERP);
+  const lookDist=Math.max(2,camera.position.y/Math.tan(pitch));
+  const look=new THREE.Vector3(target.x,target.y,target.z-lookDist);
+  camera.lookAt(look);
+  sun.position.set(avatar.position.x+8,avatar.position.y+15,avatar.position.z+12);
+  sun.target.position.copy(target);
+}
+
+function updateAudio(){
+  if(!audioCtx||!windFilter||!windGain)return;
+  const normalized=THREE.MathUtils.clamp((forwardSpeed-BASE_SLIDE_SPEED)/(MAX_SLIDE_SPEED-BASE_SLIDE_SPEED),0,1);
+  windFilter.frequency.value=400+1400*normalized;
+  windGain.gain.value=gameState==="SLIDING"?.018+.035*normalized:.0;
+}
+
+function updateHud(){
+  hud.textContent="TIME "+formatTime(elapsed);
+}
+
+/* ===== Start and render loop ===== */
+renderer.domElement.addEventListener("pointerdown",()=>{if(gameState==="READY")startRun();},{passive:true});
+function frame(now){
+  requestAnimationFrame(frame);
+  const dt=Math.min(.033,(now-lastTime)/1000);lastTime=now;
+  if(gameState==="READY"){ensureAudio();}
+  if(gameState==="SLIDING"){elapsed+=dt;updatePlayer(dt);}
+  updateParticles(dt);
+  updateBonuses();
+  updateCamera();
+  updateAudio();
+  updateHud();
+  renderer.render(scene,camera);
+}
+avatar.position.set(0,1.2,0);
+updateCamera();
+updateHud();
+requestAnimationFrame(frame);
+
+addEventListener("resize",()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+</script>
+</body>
+</html>

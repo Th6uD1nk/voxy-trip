@@ -50,7 +50,7 @@
         4. Gravity applies continuously to vertical velocity (vy -= GRAVITY * dt):
            - When grounded on terrain voxels, avatar clings to ground height with smooth step interpolation.
            - When airborne (jump, cliff drop, or teleporter warp), avatar remains strictly subject to gravity until landing.
-           - If avatar falls below track elevation threshold (Y < -12), stage failure triggers.
+           - If avatar falls below relative track elevation threshold (avatar.y < current_row_ground_y - 12.0), stage failure triggers. It MUST BE calculated relative to the current row floor elevation, NEVER as an absolute world Y < -12, because the downhill track elevation continuously descends below -25.
       `,
 
       boost_mechanics: `
@@ -58,9 +58,11 @@
         1. Speed Booster (ID 5, Glowing Neon Cyan - COLOR_NEON_CYAN): grants temporary 1.35x speed boost and intensifies cyan particle trail.
         2. Jump Booster (ID 6, Glowing Neon Lime - COLOR_NEON_LIME): imparts an instant SUPER_JUMP_FORCE (12.0) upward, launching avatar over chasm gaps.
         3. Warp Teleporter (ID 7, Glowing Neon Magenta - COLOR_NEON_MAGENTA): instantly teleports avatar forward within a strict bounded proximity radius of WARP_FORWARD_DISTANCE (10.0 units) and moderate height (+3.5 Y units), acting as a localized gap leap.
-        VISUAL EXCLUSIVITY CONTRACT:
+        VISUAL EXCLUSIVITY & INSTANCING RULES:
         - Only bonus cubes (IDs 5, 6, 7) are floating, rotating, and emit luminous neon light.
         - Obstacles (IDs 3, 4) MUST NEVER use neon or glowing emissive colors; they MUST remain matte canyon rock or dark basalt.
+        - LOCAL ROTATION: Each bonus cube instance MUST rotate individually on its own local center axis (using dummy.rotation and setMatrixAt per instance). The generator MUST NEVER rotate the parent Group or InstancedMesh around the world origin (0,0,0).
+        - PICKUP CONSUMPTION: When an avatar collects a bonus cube, that specific instance MUST immediately disappear (e.g. scaled to 0 or translated off-screen).
       `,
 
       cubic_particle_trail: `
@@ -136,6 +138,27 @@
         2. ACTIVE Z WINDOW: Entities, collision tests, and dynamic updates outside the range [avatar.z - ACTIVE_WINDOW_BACK, avatar.z + ACTIVE_WINDOW_FRONT] MUST BE skipped or culled.
         3. FRUSTUM CULLING & CHUNKING: Long voxel arrays (floors, walls) SHOULD BE partitioned into Z-chunks (e.g. 50 rows per chunk) with native Three.js bounding box frustum culling enabled, preventing the GPU from rendering offscreen geometry.
         4. SHADOW MAP BUDGET: Directional sunlight shadow map MUST NOT exceed 1024x1024 resolution and MUST focus tightly on the active sliding area around the avatar. Decorative background cliff blocks MUST NOT cast shadows.
+      `,
+
+      camera_tracking_algorithm: `
+        STRICT ALGORITHM:
+        Smooth close-proximity follower camera tracking:
+        1. Calculate target coordinates relative to avatar coordinates:
+           - current_slope: downhill gradient at current row.
+           - pitch_angle: between 45° (gentle) and 60° (steep downhill).
+           - target_height: clamped between 3.6 and 4.6 (MUST NEVER exceed 5.0).
+           - target_distance: clamped between 4.8 and 5.5 (MUST NEVER exceed 6.5).
+           - cam_target_x = avatar.x
+           - cam_target_y = avatar.y + target_height
+           - cam_target_z = avatar.z - target_distance
+        2. Interpolate camera position monotonically:
+           camera.position.x += (cam_target_x - camera.position.x) * CAMERA_LERP;
+           camera.position.y += (cam_target_y - camera.position.y) * CAMERA_LERP;
+           camera.position.z += (cam_target_z - camera.position.z) * CAMERA_LERP;
+        3. Aim camera forward ahead of avatar:
+           camera.lookAt(avatar.x, avatar.y + 0.35, avatar.z + 1.5);
+        4. ANTI-JITTER MANDATE:
+           The generator MUST NEVER execute secondary conditional clamping checks that re-lerp or overwrite camera position (such as 'if (dist > 6.5) camera.position.lerp(...)'). Target offset clamping in Step 1 inherently guarantees the proximity constraint with zero 60Hz camera jitter.
       `
     },
 
@@ -153,6 +176,7 @@
       particleTrailActive:      `a continuous stream of cubic particles MUST BE emitted behind the moving avatar`,
       cameraTracking:           `camera position MUST smoothly track avatar coordinates with dynamic pitch adaptation between 45° and 60°`,
       cameraProximityConstraint:`camera distance behind avatar MUST NEVER exceed 6.5 units and height MUST NEVER exceed 5.0 units`,
+      smoothCameraNoJitter:     `camera interpolation MUST BE smooth and continuous with zero conditional snapping or high-frequency oscillation`,
       strictThreeKeysOnly:      `the keyboard event listener MUST ONLY handle ArrowLeft, ArrowRight, and ArrowUp, and MUST NEVER bind Space, A, D, or any letter keys`,
       speedLimitsConstraint:    `forward sliding velocity MUST NEVER exceed 14.0 units per second`,
       courseLengthConstraint:   `the level array MUST contain at least 350 rows of terrain to prevent premature stage completion`,
@@ -161,7 +185,8 @@
       renderingOptimizationRule:`the renderer MUST use InstancedMesh grouping, restrict updates to an active Z window, and limit shadow map budget to 1024x1024`,
       declarativeLevelConfig:   `the track data MUST BE structured as an explicit declarative LEVEL_CONFIG object cleanly decoupled from rendering`,
       standaloneBundle:         `the deliverable MUST BE a single HTML document loading Three.js via standard CDN script tag (https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js), with 100% inline CSS and algorithmic audio (zero external media files)`,
-      noMockThreeRule:          `the generator MUST NEVER attempt to reimplement, stub, or mock Three.js or WebGL by hand, but MUST strictly include the official Three.js r128 CDN script tag in the HTML head`
+      noMockThreeRule:          `the generator MUST NEVER attempt to reimplement, stub, or mock Three.js or WebGL by hand, but MUST strictly include the official Three.js r128 CDN script tag in the HTML head`,
+      overlayVisibilityRule:    `the start/title overlay MUST BE hidden completely while in SLIDING state, and only shown during READY, CRASHED, or CLEARED states`
     }
   },
 
@@ -419,13 +444,16 @@
               smooth_lerp:      `camera position and lookAt target MUST interpolate smoothly with zero jitter`
             },
             constraints: {
-              close_proximity: `camera distance behind avatar MUST NEVER exceed 6.5 units, and camera height MUST NEVER exceed 5.0 units to guarantee a close, immersive viewpoint`
+              close_proximity: `camera distance behind avatar MUST NEVER exceed 6.5 units, and camera height MUST NEVER exceed 5.0 units to guarantee a close, immersive viewpoint`,
+              anti_jitter:     `MUST NEVER execute secondary distance checks that conditionally re-lerp or snap the camera (e.g. 'if (dist > 6.5)'); camera position MUST interpolate monotonically via CAMERA_LERP as defined in catalog.logic.camera_tracking_algorithm`
             }
           },
           tests: [
             "catalog.tests.cameraTracking",
-            "catalog.tests.cameraProximityConstraint"
-          ]
+            "catalog.tests.cameraProximityConstraint",
+            "catalog.tests.smoothCameraNoJitter"
+          ],
+          blueprints: ["catalog.logic.camera_tracking_algorithm"]
         }
       }
     },
@@ -494,10 +522,14 @@
           ],
           rules: {
             obligations: {
-              finish_line: `crossing the finish line gate MUST trigger victory state and display final completion time`,
-              instant_restart: `pressing ArrowUp or tapping the screen after crash/win MUST immediately reset avatar to start gate with zero lag`
+              finish_line:        `crossing the finish line gate MUST trigger victory state and display final completion time`,
+              start_action:       `when in READY state, pressing ArrowUp on keyboard or tapping the screen MUST start the run and transition to SLIDING`,
+              start_grounded:     `starting a run using ArrowUp or touch MUST start the avatar sliding on the track, and MUST NOT trigger an airborne jump on the start frame`,
+              overlay_visibility: `the start/title overlay MUST BE completely hidden (display: 'none' or opacity: 0) while in SLIDING state, and only shown during READY, CRASHED, or CLEARED states`,
+              instant_restart:    `pressing ArrowUp or tapping the screen after crash/win MUST immediately reset avatar and bonus cubes with zero lag`
             }
-          }
+          },
+          tests: ["catalog.tests.overlayVisibilityRule"]
         }
       }
     },
@@ -523,7 +555,7 @@
             obligations: {
               arrow_keys:         `MUST bind 'ArrowLeft' to steer left, 'ArrowRight' to steer right, and 'ArrowUp' to jump`,
               split_screen_touch: `MUST map touches on left half of screen to steering left, right half to steering right, and upward swipe or two-finger tap to jump`,
-              restart_action:     `after crash or win, pressing ArrowUp on keyboard or tapping the screen MUST restart the run`
+              start_and_restart:  `in READY, CRASHED, or CLEARED state, pressing ArrowUp on keyboard or tapping the screen MUST start or restart the game immediately`
             },
             constraints: {
               strict_three_keys:  `MUST ONLY listen to and bind the 3 arrow keys: 'ArrowLeft', 'ArrowRight', and 'ArrowUp'. MUST NEVER bind or register 'Space', 'KeyA', 'KeyD', 'KeyW', 'KeyS', 'KeyR', or any other keyboard keys.`
