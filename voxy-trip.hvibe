@@ -1,0 +1,470 @@
+{
+  hvibe_version: "0.2.1",
+  app: "voxy-trip",
+  description: `a high-speed 3D cubic voxel downhill sliding game set in a neon desert canyon, where a sliding voxel character steers with strict arrow/touch controls, jumps, and collects speed, jump, and bounded warp teleporter boosts with algorithmic synthetic audio, tracked closely by a tight dynamic slope-aware camera`,
+  stack: [`javascript`, `three.js`, `web-audio`, `html`, `css`],
+
+  catalog: {
+    globals: `
+      const VOXEL_SIZE = 1.0
+      const GRAVITY = 16.0
+      const BASE_SLIDE_SPEED = 7.0
+      const MAX_SLIDE_SPEED = 14.0
+      const JUMP_FORCE = 6.5
+      const SUPER_JUMP_FORCE = 12.0
+      const BOOST_MULTIPLIER = 1.35
+      const BOOST_DURATION = 2.0
+      const WARP_FORWARD_DISTANCE = 10.0
+      const WARP_ALTITUDE_BOOST = 3.5
+      const STEER_SPEED = 13.0
+      const STEER_DAMPING = 0.86
+      const CAMERA_DISTANCE = 5.5
+      const CAMERA_HEIGHT = 4.2
+      const CAMERA_LERP = 0.1
+
+      // Palette: Neon Cyber-Desert Canyon
+      const COLOR_CANYON_SAND = 0xd97736
+      const COLOR_CANYON_ROCK = 0x8b3a1a
+      const COLOR_NEON_CYAN = 0x00f3ff
+      const COLOR_NEON_MAGENTA = 0xff007f
+      const COLOR_NEON_AMBER = 0xffaa00
+      const COLOR_AVATAR = 0x00ffff
+    `,
+
+    logic: {
+      descent_and_air_physics: `
+        Downhill sliding and airborne gravity physics:
+        1. Forward velocity advances automatically along the course at moderate speed (BASE_SLIDE_SPEED = 7.0), boosted by downhill slopes up to MAX_SLIDE_SPEED (14.0).
+        2. Lateral steering (X axis) is strictly controlled by ArrowLeft / ArrowRight or touch zones with smooth velocity damping.
+        3. Jump mechanics: pressing ArrowUp (or mobile swipe up / dual touch) triggers a vertical velocity impulse (JUMP_FORCE = 6.5).
+        4. Gravity applies continuously to vertical velocity (vy -= GRAVITY * dt):
+           - When grounded on terrain voxels, avatar clings to ground height with smooth step interpolation.
+           - When airborne (jump, cliff drop, or teleporter warp), avatar remains strictly subject to gravity until landing.
+           - If avatar falls below track elevation threshold (Y < -12), stage failure triggers.
+      `,
+
+      boost_mechanics: `
+        Three cubic power-up interactions:
+        1. Speed Booster (Cubic Accelerator block): grants temporary 1.35x speed boost and intensifies the particle trail.
+        2. Jump Booster (Cubic Spring block): imparts an instant SUPER_JUMP_FORCE (12.0) upward, launching the avatar over obstacles.
+        3. Warp Teleporter (Cubic Portal block): instantly teleports avatar forward within a strict bounded proximity radius of WARP_FORWARD_DISTANCE (10.0 units) and moderate height (+3.5 Y units), acting as a localized gap leap rather than skipping level sections.
+      `,
+
+      cubic_particle_trail: `
+        Continuous particle trail behind the avatar:
+        1. Emits small cubic voxel particles from the avatar's base at regular sliding intervals.
+        2. Particles inherit a fraction of the avatar's velocity, shrink over a brief lifespan (~0.6s), and fade out.
+        3. Particle color shifts dynamically: cyan during normal sliding, magenta during speed boost, amber during warp/airborne.
+      `,
+
+      synthetic_audio_synthesis: `
+        STRICT ALGORITHM:
+        All game audio is synthesized algorithmically via Web Audio API without external audio files:
+        1. Glide / Wind loop: Procedural white noise buffer passed through a BiquadFilter (bandpass). Filter cutoff frequency modulates proportionally with sliding speed (400 Hz to 1800 Hz).
+        2. Jump sound: OscillatorNode with rapid upward frequency sweep (200 Hz to 650 Hz, 0.12s exponential decay).
+        3. Boost pickup: Arpeggiated dual oscillator chime (triangle wave: 440 Hz then 880 Hz, 0.25s).
+        4. Warp teleporter: Frequency modulated oscillator producing a high-tech phasing sweep (800 Hz down to 200 Hz with fast vibrato).
+        5. Explosion: Burst of white noise with steep lowpass decay (80 Hz) and rapid gain envelope decay (0.4s).
+        6. Victory fanfare: Ascending major triad notes (C5, E5, G5, C6) on square wave with gentle lowpass filtering.
+      `,
+
+      level_1_course_design: `
+        Structured 5-phase downhill level progression lasting at least 35 to 50 seconds:
+        - Total length MUST BE at least 350 rows of terrain blocks.
+        - Phase 1: Initiation Slope (~70 rows: wide 12-block track, gentle downhill gradient, introductory speed booster).
+        - Phase 2: Narrow Canyon Chasm (~80 rows: track narrows to 6 blocks, canyon walls rise, scattered rock obstacles to dodge).
+        - Phase 3: Minefield Alley (~80 rows: alternating speed boosters and explosive mine hazards requiring quick lateral weaving).
+        - Phase 4: The Great Abyss Leap (~60 rows: track breaks into a canyon gap; an airborne Warp Teleporter launches the player across the chasm).
+        - Phase 5: Final Downhill Sprint (~70 rows: steepest descent, jump booster pads to clear terminal hazards, leading into the neon finish line gate).
+      `,
+
+      neon_canyon_aesthetic: `
+        Strict geometric voxel design:
+        - Everything in the world is strictly cubic: avatar, canyon walls, obstacles, and floating boost items.
+        - Visual theme fuses warm desert canyon terra-cotta tones with glowing synthwave neon accents:
+          * Canyon terrain: warm orange and rust-red stepped voxel cliffs.
+          * Track bed: dark sandstone with luminous neon-cyan side guardrail blocks.
+          * Horizon: atmospheric synthwave dusk gradient with directional sunset sunlight and soft voxel shadows.
+      `,
+
+      portable_level_format: `
+        STRICT
+        Engine-agnostic level description format:
+        The course is encoded as a pure 2D/3D array of tile symbols completely decoupled from Three.js:
+          0 = Pit / Void (no floor)
+          1 = Standard canyon sand track voxel
+          2 = Downhill slope ramp voxel
+          3 = Solid canyon rock boulder (fatal collision)
+          4 = Explosive mine block (explodes on contact)
+          5 = Speed Booster Cube (temporary acceleration)
+          6 = Jump Booster Cube (high vertical bounce)
+          7 = Warp Teleporter Cube (forward & aerial teleportation)
+          8 = Start Gate
+          9 = Finish Gate
+      `
+    },
+
+    tests: {
+      portableLevelFormat:      `the level structure MUST BE represented as pure data completely decoupled from Three.js or rendering classes`,
+      pureCubicAesthetic:       `all visual game assets (avatar, terrain, hazards, and boosts) MUST BE rendered exclusively as sharp cubic voxels`,
+      suspenseHudRule:          `the HUD MUST display an active elapsed time chronometer, but MUST NOT display a track progress bar or completion percentage to preserve suspense`,
+      syntheticAudioOnly:       `all sound effects MUST BE synthesized algorithmically in memory via Web Audio API with zero external audio file requests`,
+      touchInputMapping:        `on touch devices, touching the left half of the screen MUST steer left, and touching the right half MUST steer right`,
+      jumpPhysics:              `pressing ArrowUp on keyboard or triggering jump MUST impart positive vertical velocity JUMP_FORCE`,
+      gravityContinuity:        `the avatar MUST ALWAYS remain subject to GRAVITY when airborne or following a teleporter warp`,
+      speedBoostEffect:         `collecting a speed boost cube MUST increase forward velocity by BOOST_MULTIPLIER for BOOST_DURATION seconds`,
+      jumpBoostEffect:          `contacting a jump booster cube MUST launch avatar with SUPER_JUMP_FORCE`,
+      teleportRadiusBounded:    `contacting a teleporter cube MUST shift avatar Z position forward by at most 10.0 units within a bounded proximity radius`,
+      particleTrailActive:      `a continuous stream of cubic particles MUST BE emitted behind the moving avatar`,
+      cameraTracking:           `camera position MUST smoothly track avatar coordinates with dynamic pitch adaptation between 45° and 60°`,
+      cameraProximityConstraint:`camera distance behind avatar MUST NEVER exceed 6.5 units and height MUST NEVER exceed 5.0 units`,
+      strictThreeKeysOnly:      `the keyboard event listener MUST ONLY handle ArrowLeft, ArrowRight, and ArrowUp, and MUST NEVER bind Space, A, D, or any letter keys`,
+      speedLimitsConstraint:    `forward sliding velocity MUST NEVER exceed 14.0 units per second`,
+      courseLengthConstraint:   `the level array MUST contain at least 350 rows of terrain to prevent premature stage completion`,
+      standaloneBundle:         `the final web deliverable MUST BE a single self-contained HTML document`
+    }
+  },
+
+  units: {
+    output: {
+      name: "Output Deliverable",
+      features: {
+        bundle: {
+          description: `a single self-contained HTML file housing the Three.js viewport, procedural audio synthesizer, physics, and controls`,
+          inputs: [`code generation`],
+          rules: {
+            obligations: {
+              self_contained: `MUST produce a single self-contained HTML file with inline CSS, embedded Three.js script, algorithmic audio synthesis, and zero external asset requests`
+            }
+          },
+          tests: ["catalog.tests.standaloneBundle"]
+        }
+      }
+    },
+
+    engine: {
+      name: "3D Rendering Engine",
+      description: `Three.js scene management, neon desert canyon atmosphere, voxel lighting, and render loop`,
+      features: {
+        canyon_atmosphere: {
+          description: `dusk synthwave sky gradient, warm directional sunlight, ambient fill light, and neon glow accents`,
+          inputs: [`DOM mount`],
+          rules: {
+            obligations: {
+              lighting: `MUST configure directional sunlight casting soft shadows on stepped voxel canyon cliffs`,
+              palette:  `MUST render stepped canyon terrain in terracotta/orange tones with glowing cyan and magenta accents`
+            }
+          },
+          blueprints: ["catalog.logic.neon_canyon_aesthetic"]
+        },
+
+        render_loop: {
+          description: `main requestAnimationFrame cycle advancing physics, audio modulation, particles, camera tracking, and scene rendering`,
+          inputs: [`browser animation frame`],
+          rules: {
+            obligations: {
+              delta_time: `all kinematics, gravity, and particle lifespans MUST BE scaled by frame delta time`
+            }
+          }
+        }
+      }
+    },
+
+    audio: {
+      name: "Procedural Audio Synthesizer",
+      description: `purely algorithmic Web Audio sound effects generated dynamically from math and noise buffers`,
+      features: {
+        sound_engine: {
+          description: `in-memory audio context synthesizing slide wind whoosh, jumps, boosts, warps, mine explosions, and victory fanfare`,
+          inputs: [`game events: slide, jump, boost, warp, crash, win`],
+          rules: {
+            obligations: {
+              procedural_generation: `MUST synthesize all sounds using Web Audio API nodes (OscillatorNode, BiquadFilterNode, AudioBufferSourceNode with generated noise) with zero external media files`,
+              speed_reactive_glide: `MUST dynamically modulate the glide wind filter cutoff frequency based on current avatar forward speed`
+            }
+          },
+          tests: ["catalog.tests.syntheticAudioOnly"],
+          blueprints: ["catalog.logic.synthetic_audio_synthesis"]
+        }
+      }
+    },
+
+    world: {
+      name: "Neon Canyon Level & Items",
+      description: `portable track representation, stepped voxel cliffs, hazards, and floating cubic bonus items`,
+      features: {
+        level_data: {
+          description: `pure data matrix defining the 5-phase course: initiation, narrow chasm, minefield, abyss warp leap, and final sprint`,
+          inputs: [`stage initialization`],
+          rules: {
+            obligations: {
+              serializable: `MUST encode track using engine-agnostic tile IDs (0 to 9)`,
+              five_phases:  `course MUST implement the 5 structured phases defined in catalog.logic.level_1_course_design ending in finish gate ID 9`
+            },
+            constraints: {
+              min_length: `the track array MUST contain at least 350 sequential rows of terrain to provide an immersive 35 to 50 seconds run`
+            }
+          },
+          tests: [
+            "catalog.tests.portableLevelFormat",
+            "catalog.tests.courseLengthConstraint"
+          ],
+          blueprints: [
+            "catalog.logic.portable_level_format",
+            "catalog.logic.level_1_course_design"
+          ]
+        },
+
+        voxel_geometry: {
+          description: `instanced or merged cubic mesh generation for track floor, canyon wall steps, and decorative voxel formations`,
+          inputs: [`level_data loaded`],
+          depends_on: [
+            {
+              feature: `level_data`,
+              when: [`generating 3D world from data`]
+            }
+          ],
+          rules: {
+            obligations: {
+              pure_cubes: `all terrain elements MUST BE constructed strictly from sharp cubic voxels (VOXEL_SIZE)`
+            }
+          },
+          tests: ["catalog.tests.pureCubicAesthetic"]
+        },
+
+        bonus_cubes: {
+          description: `floating, rotating cubic power-ups on the track: Speed Booster (Cyan), Jump Booster (Magenta), and Warp Teleporter (Amber)`,
+          inputs: [`character intersection`],
+          depends_on: [
+            {
+              feature: `level_data`,
+              when: [`placing bonus items at coordinates (IDs 5, 6, 7)`]
+            }
+          ],
+          rules: {
+            obligations: {
+              item_visuals: `bonus items MUST BE floating glowing cubes with continuous gentle rotation`,
+              cube_types:   `MUST implement Speed Booster (ID 5), Jump Booster (ID 6), and Warp Teleporter (ID 7)`
+            }
+          },
+          blueprints: ["catalog.logic.boost_mechanics"]
+        },
+
+        hazards: {
+          description: `deadly obstacles: solid rock boulders, abyss pits, and explosive cubic mines`,
+          inputs: [`character collision`],
+          rules: {
+            obligations: {
+              mine_explosion: `colliding with a mine MUST trigger an explosive radial scatter of voxel debris particles and fail stage`
+            }
+          }
+        }
+      }
+    },
+
+    character: {
+      name: "Voxel Sliding Avatar & Trail",
+      description: `cubic avatar gliding downhill with calibrated speed, tight steering inertia, jumping ability, and continuous particle trail`,
+      features: {
+        avatar_mesh: {
+          description: `a sleek cubic voxel character with expressive glowing visor and dynamic banking tilt when turning`,
+          inputs: [`scene init`],
+          rules: {
+            obligations: {
+              cubic_form: `avatar MUST BE composed of sharp cubic voxels with contrasting neon visor and base runner`
+            }
+          },
+          tests: ["catalog.tests.pureCubicAesthetic"]
+        },
+
+        slide_and_air_kinematics: {
+          description: `computes continuous downhill slide, lateral steering, jump impulse, and airborne gravity`,
+          inputs: [`frame tick`, `player steering / jump input`],
+          depends_on: [
+            {
+              feature: `avatar_mesh`,
+              when: [`updating position and banking angle`]
+            },
+            {
+              feature: `world.voxel_geometry`,
+              when: [`determining ground contact and slope`]
+            }
+          ],
+          rules: {
+            obligations: {
+              slope_acceleration: `forward velocity MUST accelerate moderately on downhill sections from BASE_SLIDE_SPEED (7.0) up to MAX_SLIDE_SPEED (14.0)`,
+              jump_handling:      `jumping MUST apply JUMP_FORCE upward, transitioning avatar to airborne state`,
+              constant_gravity:   `when in the air, vertical velocity MUST decrease by GRAVITY every frame until landing or void fall`
+            },
+            constraints: {
+              max_speed_limit: `forward sliding velocity MUST NEVER exceed 14.0 units per second`
+            }
+          },
+          tests: [
+            "catalog.tests.jumpPhysics",
+            "catalog.tests.gravityContinuity",
+            "catalog.tests.speedLimitsConstraint"
+          ],
+          blueprints: ["catalog.logic.descent_and_air_physics"]
+        },
+
+        particle_trail: {
+          description: `continuous particle emitter producing shrinking cubic voxel particles streaming behind the sliding avatar`,
+          inputs: [`avatar motion`],
+          depends_on: [
+            {
+              feature: `slide_and_air_kinematics`,
+              when: [`emitting from avatar coordinates`]
+            }
+          ],
+          rules: {
+            obligations: {
+              trail_active: `MUST emit cubic particles behind avatar at every frame during motion`,
+              color_shift:  `trail color MUST reflect avatar status: cyan normally, magenta during speed boost, amber when airborne`
+            }
+          },
+          tests: ["catalog.tests.particleTrailActive"],
+          blueprints: ["catalog.logic.cubic_particle_trail"]
+        }
+      }
+    },
+
+    camera: {
+      name: "Slope-Aware Tracking Camera",
+      description: `close-up third-person camera dynamically adjusting altitude and pitch between 45° and 60° based on terrain slope`,
+      features: {
+        follower: {
+          description: `tight, close-up tracking trailing directly behind avatar at 45°-60° angle, adjusting elevation and pitch dynamically based on track slope`,
+          inputs: [`character position update`],
+          depends_on: [
+            {
+              feature: `character.slide_and_air_kinematics`,
+              when: [`targeting avatar position`]
+            }
+          ],
+          rules: {
+            obligations: {
+              pitch_range:      `camera pitch MUST remain between 45° and 60° looking downward toward the avatar`,
+              slope_adaptation: `on steep descents, camera MUST pull back slightly and tilt down to reveal the downhill path ahead`,
+              smooth_lerp:      `camera position and lookAt target MUST interpolate smoothly with zero jitter`
+            },
+            constraints: {
+              close_proximity: `camera distance behind avatar MUST NEVER exceed 6.5 units, and camera height MUST NEVER exceed 5.0 units to guarantee a close, immersive viewpoint`
+            }
+          },
+          tests: [
+            "catalog.tests.cameraTracking",
+            "catalog.tests.cameraProximityConstraint"
+          ]
+        }
+      }
+    },
+
+    gameplay: {
+      name: "Interactions, Boosts & Lifecycle",
+      description: `handles boost activations, hazard collisions, suspenseful chronometer HUD, and instant respawn`,
+      features: {
+        boost_effects: {
+          description: `applies speed boost timer, vertical jump boost, and bounded forward/airborne teleporter warp`,
+          inputs: [`avatar touches bonus cube`],
+          depends_on: [
+            {
+              feature: `world.bonus_cubes`,
+              when: [`detecting pickup overlap`]
+            },
+            {
+              feature: `character.slide_and_air_kinematics`,
+              when: [`mutating velocity or position`]
+            },
+            {
+              feature: `audio.sound_engine`,
+              when: [`triggering boost sound effects`]
+            }
+          ],
+          rules: {
+            obligations: {
+              speed_boost:     `speed booster MUST multiply forward speed by BOOST_MULTIPLIER for BOOST_DURATION seconds`,
+              jump_boost:      `jump booster MUST launch avatar vertically with SUPER_JUMP_FORCE`,
+              teleporter_warp: `teleporter cube MUST advance avatar Z position by WARP_FORWARD_DISTANCE and add WARP_ALTITUDE_BOOST, subjecting it immediately to gravity`
+            },
+            constraints: {
+              warp_radius_bound: `the teleporter warp MUST NEVER displace the avatar forward by more than 10.0 units along the track, acting as a bounded tactical leap across obstacles rather than skipping level sections`
+            }
+          },
+          tests: [
+            "catalog.tests.speedBoostEffect",
+            "catalog.tests.jumpBoostEffect",
+            "catalog.tests.teleportRadiusBounded"
+          ],
+          blueprints: ["catalog.logic.boost_mechanics"]
+        },
+
+        suspense_hud: {
+          description: `minimalist digital chronometer displaying elapsed time with high precision, deliberately omitting any progress bar to preserve suspense`,
+          inputs: [`frame tick`],
+          rules: {
+            obligations: {
+              chronometer: `MUST display an elapsed time timer in seconds and hundredths (00:00.00) in the corner of the screen`
+            },
+            constraints: {
+              no_progress_bar: `MUST NOT display a progress bar, distance-to-finish gauge, or completion percentage in order to maintain maximum suspense`
+            }
+          },
+          tests: ["catalog.tests.suspenseHudRule"]
+        },
+
+        stage_lifecycle: {
+          description: `manages game states: READY, SLIDING, CRASHED, CLEARED, with instant restart`,
+          inputs: [`collision trigger`, `finish line trigger`, `player restart action`],
+          depends_on: [
+            {
+              feature: `audio.sound_engine`,
+              when: [`triggering crash or victory fanfare`]
+            }
+          ],
+          rules: {
+            obligations: {
+              finish_line: `crossing the finish line gate MUST trigger victory state and display final completion time`,
+              instant_restart: `pressing ArrowUp or tapping the screen after crash/win MUST immediately reset avatar to start gate with zero lag`
+            }
+          }
+        }
+      }
+    },
+
+    controls: {
+      name: "Ultra-Minimalist Controls",
+      description: `strict 3-arrow-key mapping for desktop and clean two-zone screen touch for mobile with zero extraneous key bindings`,
+      features: {
+        input_handler: {
+          description: `pure directional controls restricted strictly to ArrowLeft, ArrowRight, and ArrowUp on keyboard, and left/right touch zones on mobile`,
+          inputs: [`keydown / keyup`, `touchstart / touchend`],
+          depends_on: [
+            {
+              feature: `character.slide_and_air_kinematics`,
+              when: [`applying steering and jump triggers`]
+            },
+            {
+              feature: `audio.sound_engine`,
+              when: [`triggering jump audio on jump action`]
+            }
+          ],
+          rules: {
+            obligations: {
+              arrow_keys:         `MUST bind 'ArrowLeft' to steer left, 'ArrowRight' to steer right, and 'ArrowUp' to jump`,
+              split_screen_touch: `MUST map touches on left half of screen to steering left, right half to steering right, and upward swipe or two-finger tap to jump`,
+              restart_action:     `after crash or win, pressing ArrowUp on keyboard or tapping the screen MUST restart the run`
+            },
+            constraints: {
+              strict_three_keys:  `MUST ONLY listen to and bind the 3 arrow keys: 'ArrowLeft', 'ArrowRight', and 'ArrowUp'. MUST NEVER bind or register 'Space', 'KeyA', 'KeyD', 'KeyW', 'KeyS', 'KeyR', or any other keyboard keys.`
+            }
+          },
+          tests: [
+            "catalog.tests.touchInputMapping",
+            "catalog.tests.strictThreeKeysOnly"
+          ]
+        }
+      }
+    }
+  }
+}
