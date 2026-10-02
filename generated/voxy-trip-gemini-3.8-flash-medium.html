@@ -1,0 +1,1064 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Voxy Trip — Neon Canyon Descent</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    background: #0d021a;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+  #view {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  #timer {
+    position: fixed;
+    top: calc(16px + env(safe-area-inset-top, 0px));
+    right: calc(20px + env(safe-area-inset-right, 0px));
+    font-size: 32px;
+    font-weight: 800;
+    color: #00f3ff;
+    letter-spacing: 2px;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 0 10px #00f3ff, 0 0 24px #ff007f;
+    pointer-events: none;
+    z-index: 10;
+  }
+  #overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 24px;
+    background: rgba(13, 2, 26, 0.55);
+    backdrop-filter: blur(2px);
+    pointer-events: none;
+    z-index: 20;
+    transition: opacity 0.2s ease;
+  }
+  #overlay-title {
+    margin: 0 0 12px;
+    font-size: clamp(36px, 8vw, 76px);
+    font-weight: 900;
+    font-style: italic;
+    letter-spacing: 4px;
+    color: #00f3ff;
+    text-shadow: 0 0 14px #00f3ff, 0 0 32px #ff007f, 3px 3px 0 #8b3a1a;
+  }
+  #overlay-sub {
+    margin: 0;
+    max-width: 480px;
+    font-size: 15px;
+    line-height: 1.6;
+    color: #ffaa00;
+    letter-spacing: 1px;
+    text-shadow: 0 0 8px rgba(255, 170, 0, 0.6);
+  }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+<div id="view"></div>
+<div id="timer">00:00.00</div>
+<div id="overlay">
+  <h1 id="overlay-title">VOXY TRIP</h1>
+  <p id="overlay-sub">PRESS ARROW UP OR TAP TO SLIDE<br>STEER: LEFT / RIGHT ARROWS • JUMP: UP ARROW</p>
+</div>
+
+<script>
+// Catalog Globals & Constants
+const VOXEL_SIZE = 1.0;
+const GRAVITY = 16.0;
+const BASE_SLIDE_SPEED = 7.0;
+const MAX_SLIDE_SPEED = 14.0;
+const JUMP_FORCE = 6.5;
+const SUPER_JUMP_FORCE = 12.0;
+const BOOST_MULTIPLIER = 1.35;
+const BOOST_DURATION = 2.0;
+const WARP_FORWARD_DISTANCE = 10.0;
+const WARP_ALTITUDE_BOOST = 3.5;
+const STEER_SPEED = 13.0;
+const STEER_DAMPING = 0.86;
+const CAMERA_DISTANCE = 5.5;
+const CAMERA_HEIGHT = 4.2;
+const CAMERA_LERP = 0.1;
+
+// Palette: Neon Cyber-Desert Canyon
+const COLOR_CANYON_SAND = 0xd97736;
+const COLOR_CANYON_ROCK = 0x8b3a1a;
+const COLOR_NEON_CYAN = 0x00f3ff;      // Speed Booster Cube (ID 5)
+const COLOR_NEON_LIME = 0x39ff14;      // Jump Booster Cube (ID 6)
+const COLOR_NEON_MAGENTA = 0xff007f;   // Warp Teleporter Cube (ID 7)
+const COLOR_NEON_AMBER = 0xffaa00;     // Start/HUD accents
+const COLOR_AVATAR = 0x00ffff;
+
+// Track & Grid Dimensions
+const TRACK_WIDTH = 12;
+const W = 12;
+
+// Performance & Course Tuning
+const MIN_OBSTACLE_SPACING_ROWS = 10;
+const ACTIVE_WINDOW_BACK = 15.0;
+const ACTIVE_WINDOW_FRONT = 85.0;
+
+// Declarative Level Configuration
+const LEVEL_CONFIG = {
+  name: "Neon Canyon Descent",
+  width: TRACK_WIDTH,
+  total_rows: 360,
+  slope_profile: [0.03, 0.045, 0.06, 0.12, 0.08],
+  grid: []
+};
+
+// Procedural Level Grid Assembly adhering strictly to 5 Phases, Navigability, and Spacing Rules
+(() => {
+  const g = LEVEL_CONFIG.grid;
+  for (let r = 0; r < 360; r++) {
+    const row = new Array(W).fill(1);
+
+    // Phase 1: Initiation Slope (0-69)
+    if (r < 70) {
+      if (r === 0) row[Math.floor(W / 2)] = 8; // Start Gate
+      else if (r === 35) row[Math.floor(W / 2)] = 5; // Introductory Speed Booster
+    }
+    // Phase 2: Narrow Canyon Chasm (70-149)
+    else if (r < 150) {
+      row[0] = 0; row[1] = 0; row[2] = 0;
+      row[9] = 0; row[10] = 0; row[11] = 0;
+      // Spaced boulders with min 10 clear rows, leaving >= 2 open navigable lanes
+      if (r % 12 === 0) {
+        if ((r / 12) % 2 === 0) { row[3] = 3; }
+        else { row[8] = 3; }
+      }
+    }
+    // Phase 3: Minefield Alley (150-229)
+    else if (r < 230) {
+      row[0] = 0; row[1] = 0;
+      row[10] = 0; row[11] = 0;
+      // Alternating speed boosters and dark basalt mines
+      if (r % 12 === 0) {
+        if ((r / 12) % 2 === 0) { row[4] = 4; row[7] = 5; }
+        else { row[7] = 4; row[4] = 5; }
+      }
+    }
+    // Phase 4: The Great Abyss Leap (230-289)
+    else if (r < 290) {
+      row[0] = 0; row[1] = 0;
+      row[10] = 0; row[11] = 0;
+      // Canyon gap: void abyss
+      if (r >= 250 && r <= 265) {
+        row.fill(0);
+      } else if (r === 245) {
+        row[5] = 7; // Warp Teleporter launches player across gap
+      }
+    }
+    // Phase 5: Final Downhill Sprint (290-359)
+    else {
+      row[0] = 0; row[1] = 0;
+      row[10] = 0; row[11] = 0;
+      if (r % 14 === 0 && r < 345) {
+        row[5] = 6; // Jump Booster pads
+        row[7] = 3; // Boulder to jump over
+      }
+      if (r === 356) {
+        row.fill(1);
+        row[0] = 0; row[11] = 0;
+        row[Math.floor(W / 2)] = 9; // Finish Gate
+      }
+    }
+    g.push(row);
+  }
+})();
+
+// Calculate continuous downhill surface elevation per row
+const PHASES = [
+  { start: 0, end: 69, slope: 0.03, baseY: 0 },
+  { start: 70, end: 149, slope: 0.045, baseY: -70 * 0.03 },
+  { start: 150, end: 229, slope: 0.06, baseY: -70 * 0.03 - 80 * 0.045 },
+  { start: 230, end: 289, slope: 0.12, baseY: -70 * 0.03 - 80 * 0.045 - 80 * 0.06 },
+  { start: 290, end: 359, slope: 0.08, baseY: -70 * 0.03 - 80 * 0.045 - 80 * 0.06 - 60 * 0.12 }
+];
+
+function getRowElevation(r) {
+  const clampR = Math.max(0, Math.min(LEVEL_CONFIG.total_rows - 1, r));
+  for (const p of PHASES) {
+    if (clampR >= p.start && clampR <= p.end) {
+      return p.baseY - (clampR - p.start) * p.slope;
+    }
+  }
+  return -30;
+}
+
+function getSlopeAtRow(r) {
+  const clampR = Math.max(0, Math.min(LEVEL_CONFIG.total_rows - 1, r));
+  for (const p of PHASES) {
+    if (clampR >= p.start && clampR <= p.end) return p.slope;
+  }
+  return 0.05;
+}
+
+// ---------------------------------------------------------------------------
+// Procedural Web Audio Engine (Strictly Algorithmic, Zero External Audio)
+// ---------------------------------------------------------------------------
+let audioCtx = null;
+let glideNoiseNode = null;
+let glideFilter = null;
+let glideGain = null;
+
+function initAudio() {
+  if (audioCtx) {
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    return;
+  }
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return;
+  audioCtx = new AudioContextClass();
+
+  // Glide wind loop using procedural white noise
+  const bufferLen = audioCtx.sampleRate * 2;
+  const noiseBuf = audioCtx.createBuffer(1, bufferLen, audioCtx.sampleRate);
+  const data = noiseBuf.getChannelData(0);
+  for (let i = 0; i < bufferLen; i++) data[i] = Math.random() * 2 - 1;
+
+  glideNoiseNode = audioCtx.createBufferSource();
+  glideNoiseNode.buffer = noiseBuf;
+  glideNoiseNode.loop = true;
+
+  glideFilter = audioCtx.createBiquadFilter();
+  glideFilter.type = "bandpass";
+  glideFilter.frequency.setValueAtTime(400, audioCtx.currentTime);
+  glideFilter.Q.setValueAtTime(0.8, audioCtx.currentTime);
+
+  glideGain = audioCtx.createGain();
+  glideGain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+
+  glideNoiseNode.connect(glideFilter);
+  glideFilter.connect(glideGain);
+  glideGain.connect(audioCtx.destination);
+  glideNoiseNode.start();
+}
+
+const sound = {
+  glide(speed, active) {
+    if (!audioCtx || !glideFilter || !glideGain) return;
+    const clampedSpd = Math.max(BASE_SLIDE_SPEED, Math.min(MAX_SLIDE_SPEED, speed));
+    const ratio = (clampedSpd - BASE_SLIDE_SPEED) / (MAX_SLIDE_SPEED - BASE_SLIDE_SPEED);
+    const targetFreq = 400 + ratio * 1400;
+    glideFilter.frequency.setTargetAtTime(targetFreq, audioCtx.currentTime, 0.05);
+    glideGain.gain.setTargetAtTime(active ? 0.22 : 0.0001, audioCtx.currentTime, 0.08);
+  },
+
+  jump() {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(200, t);
+    osc.frequency.exponentialRampToValueAtTime(650, t + 0.12);
+    g.gain.setValueAtTime(0.35, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+    osc.connect(g);
+    g.connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.13);
+  },
+
+  boost() {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    [440, 880].forEach((freq, idx) => {
+      const startT = t + idx * 0.1;
+      const osc = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(freq, startT);
+      g.gain.setValueAtTime(0.25, startT);
+      g.gain.exponentialRampToValueAtTime(0.001, startT + 0.14);
+      osc.connect(g);
+      g.connect(audioCtx.destination);
+      osc.start(startT);
+      osc.stop(startT + 0.15);
+    });
+  },
+
+  warp() {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const lfo = audioCtx.createOscillator();
+    const lfoGain = audioCtx.createGain();
+    const g = audioCtx.createGain();
+
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(800, t);
+    osc.frequency.exponentialRampToValueAtTime(200, t + 0.35);
+
+    lfo.frequency.setValueAtTime(26, t);
+    lfoGain.gain.setValueAtTime(45, t);
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc.frequency);
+
+    g.gain.setValueAtTime(0.3, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+
+    osc.connect(g);
+    g.connect(audioCtx.destination);
+    osc.start(t);
+    lfo.start(t);
+    osc.stop(t + 0.38);
+    lfo.stop(t + 0.38);
+  },
+
+  explosion() {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    const len = Math.floor(audioCtx.sampleRate * 0.4);
+    const buf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(800, t);
+    filter.frequency.exponentialRampToValueAtTime(80, t + 0.4);
+
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.6, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+
+    src.connect(filter);
+    filter.connect(g);
+    g.connect(audioCtx.destination);
+    src.start(t);
+    src.stop(t + 0.42);
+  },
+
+  win() {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    [523.25, 659.25, 783.99, 1046.5].forEach((freq, idx) => {
+      const startT = t + idx * 0.12;
+      const osc = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      osc.type = "square";
+      osc.frequency.setValueAtTime(freq, startT);
+      g.gain.setValueAtTime(0.2, startT);
+      g.gain.exponentialRampToValueAtTime(0.001, startT + 0.3);
+      osc.connect(g);
+      g.connect(audioCtx.destination);
+      osc.start(startT);
+      osc.stop(startT + 0.32);
+    });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Three.js Rendering Engine & Optimized Instanced Geometry
+// ---------------------------------------------------------------------------
+const container = document.getElementById("view");
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+container.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x32093f, 30, 95);
+
+const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 150);
+
+// Lighting
+const hemiLight = new THREE.HemisphereLight(0xffa26b, 0x1f0b33, 0.75);
+scene.add(hemiLight);
+
+const sun = new THREE.DirectionalLight(0xffc187, 1.3);
+sun.castShadow = true;
+sun.shadow.mapSize.width = 1024;
+sun.shadow.mapSize.height = 1024;
+sun.shadow.camera.near = 1;
+sun.shadow.camera.far = 80;
+sun.shadow.camera.left = -22;
+sun.shadow.camera.right = 22;
+sun.shadow.camera.top = 22;
+sun.shadow.camera.bottom = -22;
+scene.add(sun);
+scene.add(sun.target);
+
+// Voxel Box Base Geometry
+const voxelGeo = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+const dummy = new THREE.Object3D();
+
+// Instanced Meshes Collection
+const floorData = [];
+const wallData = [];
+const railData = [];
+const obstacleData = [];
+const speedBoostData = [];
+const jumpBoostData = [];
+const warpBoostData = [];
+
+// Populate World Data from LEVEL_CONFIG
+for (let r = 0; r < LEVEL_CONFIG.total_rows; r++) {
+  const row = LEVEL_CONFIG.grid[r];
+  const y = getRowElevation(r);
+  let hasTrack = false;
+  let minCol = -1, maxCol = -1;
+
+  for (let c = 0; c < W; c++) {
+    const id = row[c];
+    const x = c - 5.5;
+    const z = r;
+
+    if (id !== 0) {
+      hasTrack = true;
+      if (minCol < 0) minCol = c;
+      maxCol = c;
+
+      // Track floor
+      floorData.push({ x, y: y - 0.5, z, c: (r + c) % 2 === 0 ? COLOR_CANYON_SAND : 0xc76527 });
+
+      // Obstacles (Strictly matte canyon rock or dark basalt, ZERO NEON GLOW)
+      if (id === 3) obstacleData.push({ x, y: y + 0.48, z, type: 3, c: COLOR_CANYON_ROCK });
+      if (id === 4) obstacleData.push({ x, y: y + 0.48, z, type: 4, c: 0x221111 });
+
+      // Power-up Bonus Cubes (Strictly Neon Glowing Materials)
+      if (id === 5) speedBoostData.push({ x, y: y + 1.15, z, baseRow: r, alive: true });
+      if (id === 6) jumpBoostData.push({ x, y: y + 1.15, z, baseRow: r, alive: true });
+      if (id === 7) warpBoostData.push({ x, y: y + 1.15, z, baseRow: r, alive: true });
+    }
+  }
+
+  // Guardrails & Stepped Canyon Wall Cliffs
+  if (hasTrack) {
+    const leftX = minCol - 5.5 - 0.5;
+    const rightX = maxCol - 5.5 + 0.5;
+    railData.push({ x: leftX, y: y + 0.25, z: r, s: 0.5, c: COLOR_NEON_CYAN });
+    railData.push({ x: rightX, y: y + 0.25, z: r, s: 0.5, c: COLOR_NEON_CYAN });
+
+    // Decorative stepped side cliffs
+    for (let d = 1; d <= 4; d++) {
+      const heightSteps = Math.max(1, 5 - d);
+      for (let k = 0; k < heightSteps; k++) {
+        wallData.push({ x: leftX - d * 0.8, y: y + k * 0.8, z: r, c: COLOR_CANYON_ROCK });
+        wallData.push({ x: rightX + d * 0.8, y: y + k * 0.8, z: r, c: COLOR_CANYON_ROCK });
+      }
+    }
+  }
+}
+
+// Build Instanced Meshes
+function createInstancedMesh(material, items, castShadow, receiveShadow) {
+  const mesh = new THREE.InstancedMesh(voxelGeo, material, items.length);
+  mesh.castShadow = castShadow;
+  mesh.receiveShadow = receiveShadow;
+  mesh.frustumCulled = false; // Managed via active Z-window
+  const color = new THREE.Color();
+
+  items.forEach((item, idx) => {
+    dummy.position.set(item.x, item.y, item.z);
+    dummy.scale.setScalar(item.s || 1.0);
+    dummy.rotation.set(0, 0, 0);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(idx, dummy.matrix);
+    if (item.c) {
+      color.setHex(item.c);
+      mesh.setColorAt(idx, color);
+    }
+  });
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  scene.add(mesh);
+  return mesh;
+}
+
+const floorMesh = createInstancedMesh(
+  new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95 }),
+  floorData, false, true
+);
+const wallMesh = createInstancedMesh(
+  new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95 }),
+  wallData, false, true
+);
+const railMesh = createInstancedMesh(
+  new THREE.MeshBasicMaterial({ color: 0xffffff }),
+  railData, false, false
+);
+const obstacleMesh = createInstancedMesh(
+  new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0, metalness: 0.1 }),
+  obstacleData, true, true
+);
+
+// Bonus Cubes Meshes (Instanced Glowing Materials)
+const speedBoostMesh = new THREE.InstancedMesh(
+  voxelGeo,
+  new THREE.MeshStandardMaterial({ color: COLOR_NEON_CYAN, emissive: COLOR_NEON_CYAN, emissiveIntensity: 1.2 }),
+  Math.max(1, speedBoostData.length)
+);
+const jumpBoostMesh = new THREE.InstancedMesh(
+  voxelGeo,
+  new THREE.MeshStandardMaterial({ color: COLOR_NEON_LIME, emissive: COLOR_NEON_LIME, emissiveIntensity: 1.2 }),
+  Math.max(1, jumpBoostData.length)
+);
+const warpBoostMesh = new THREE.InstancedMesh(
+  voxelGeo,
+  new THREE.MeshStandardMaterial({ color: COLOR_NEON_MAGENTA, emissive: COLOR_NEON_MAGENTA, emissiveIntensity: 1.3 }),
+  Math.max(1, warpBoostData.length)
+);
+
+[speedBoostMesh, jumpBoostMesh, warpBoostMesh].forEach(m => {
+  m.castShadow = true;
+  m.frustumCulled = false;
+  scene.add(m);
+});
+
+// Start and Finish Neon Gate Arches
+function createGate(r, colorHex) {
+  const y = getRowElevation(r);
+  const gateMat = new THREE.MeshBasicMaterial({ color: colorHex });
+  const gateGroup = new THREE.Group();
+  for (let h = 0; h < 6; h++) {
+    const leftCol = new THREE.Mesh(voxelGeo, gateMat);
+    leftCol.position.set(-5.5, y + h + 0.5, r);
+    const rightCol = new THREE.Mesh(voxelGeo, gateMat);
+    rightCol.position.set(5.5, y + h + 0.5, r);
+    gateGroup.add(leftCol, rightCol);
+  }
+  for (let x = -5.5; x <= 5.5; x += 1.0) {
+    const beam = new THREE.Mesh(voxelGeo, gateMat);
+    beam.position.set(x, y + 6.0, r);
+    gateGroup.add(beam);
+  }
+  scene.add(gateGroup);
+}
+createGate(0, COLOR_NEON_AMBER);
+createGate(356, COLOR_NEON_MAGENTA);
+
+// ---------------------------------------------------------------------------
+// Voxel Character Avatar & Dynamic Banking Mesh
+// ---------------------------------------------------------------------------
+const avatarGroup = new THREE.Group();
+
+const bodyMesh = new THREE.Mesh(
+  voxelGeo,
+  new THREE.MeshStandardMaterial({ color: COLOR_AVATAR, emissive: COLOR_AVATAR, emissiveIntensity: 0.45, roughness: 0.3 })
+);
+bodyMesh.scale.set(0.8, 0.8, 0.8);
+bodyMesh.position.set(0, 0.65, 0);
+bodyMesh.castShadow = true;
+avatarGroup.add(bodyMesh);
+
+const visorMesh = new THREE.Mesh(
+  voxelGeo,
+  new THREE.MeshStandardMaterial({ color: COLOR_NEON_AMBER, emissive: COLOR_NEON_AMBER, emissiveIntensity: 1.2 })
+);
+visorMesh.scale.set(0.6, 0.2, 0.22);
+visorMesh.position.set(0, 0.78, 0.35);
+avatarGroup.add(visorMesh);
+
+const runnerMesh = new THREE.Mesh(
+  voxelGeo,
+  new THREE.MeshStandardMaterial({ color: COLOR_NEON_MAGENTA, emissive: COLOR_NEON_MAGENTA, emissiveIntensity: 0.9 })
+);
+runnerMesh.scale.set(0.9, 0.15, 1.2);
+runnerMesh.position.set(0, 0.1, 0);
+avatarGroup.add(runnerMesh);
+
+scene.add(avatarGroup);
+
+// ---------------------------------------------------------------------------
+// Cubic Particle Trail & Burst System
+// ---------------------------------------------------------------------------
+const MAX_PARTICLES = 180;
+const particleMesh = new THREE.InstancedMesh(
+  voxelGeo,
+  new THREE.MeshBasicMaterial({ color: 0xffffff }),
+  MAX_PARTICLES
+);
+particleMesh.frustumCulled = false;
+scene.add(particleMesh);
+
+const particles = Array.from({ length: MAX_PARTICLES }, () => ({
+  x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0,
+  life: 0, maxLife: 0.6, size: 0.22, color: new THREE.Color()
+}));
+let pIdx = 0;
+
+function emitParticle(x, y, z, vx, vy, vz, hexColor, maxLife, size) {
+  const p = particles[pIdx];
+  pIdx = (pIdx + 1) % MAX_PARTICLES;
+  p.x = x; p.y = y; p.z = z;
+  p.vx = vx; p.vy = vy; p.vz = vz;
+  p.life = maxLife;
+  p.maxLife = maxLife;
+  p.size = size;
+  p.color.setHex(hexColor);
+}
+
+function burstExplosion(x, y, z) {
+  const colors = [COLOR_NEON_AMBER, COLOR_NEON_MAGENTA, COLOR_CANYON_ROCK, 0xffffff];
+  for (let i = 0; i < 45; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 2.5 + Math.random() * 6.5;
+    emitParticle(
+      x, y + 0.4, z,
+      Math.cos(angle) * speed,
+      3.0 + Math.random() * 5.0,
+      Math.sin(angle) * speed,
+      colors[i % colors.length],
+      0.65 + Math.random() * 0.4,
+      0.28
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Game State & Strict Input Controls (ArrowLeft, ArrowRight, ArrowUp ONLY)
+// ---------------------------------------------------------------------------
+const state = {
+  mode: "READY", // READY, SLIDING, CRASHED, CLEARED
+  x: 0,
+  y: 0,
+  z: 0,
+  vx: 0,
+  vy: 0,
+  speed: BASE_SLIDE_SPEED,
+  grounded: true,
+  boostTimer: 0,
+  elapsedTime: 0,
+  jumpBuffered: false,
+  bankAngle: 0
+};
+
+const input = { left: false, right: false };
+
+// Strict 3-key listener: ArrowLeft, ArrowRight, ArrowUp ONLY
+window.addEventListener("keydown", (e) => {
+  if (e.code !== "ArrowLeft" && e.code !== "ArrowRight" && e.code !== "ArrowUp") return;
+  e.preventDefault();
+
+  if (state.mode === "READY" || state.mode === "CRASHED" || state.mode === "CLEARED") {
+    if (e.code === "ArrowUp") startOrRestart();
+    return;
+  }
+
+  if (e.code === "ArrowLeft") input.left = true;
+  if (e.code === "ArrowRight") input.right = true;
+  if (e.code === "ArrowUp" && !e.repeat) state.jumpBuffered = true;
+}, { passive: false });
+
+window.addEventListener("keyup", (e) => {
+  if (e.code !== "ArrowLeft" && e.code !== "ArrowRight" && e.code !== "ArrowUp") return;
+  e.preventDefault();
+  if (e.code === "ArrowLeft") input.left = false;
+  if (e.code === "ArrowRight") input.right = false;
+}, { passive: false });
+
+// Mobile Split-screen touch & upward swipe jump
+let touchStartY = 0;
+window.addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  initAudio();
+  if (state.mode === "READY" || state.mode === "CRASHED" || state.mode === "CLEARED") {
+    startOrRestart();
+    return;
+  }
+  if (e.touches.length >= 2) {
+    state.jumpBuffered = true;
+    return;
+  }
+  const t = e.touches[0];
+  touchStartY = t.clientY;
+  if (t.clientX < window.innerWidth / 2) {
+    input.left = true;
+    input.right = false;
+  } else {
+    input.right = true;
+    input.left = false;
+  }
+}, { passive: false });
+
+window.addEventListener("touchmove", (e) => {
+  e.preventDefault();
+  if (e.touches.length > 0) {
+    const currentY = e.touches[0].clientY;
+    if (touchStartY - currentY > 45) {
+      state.jumpBuffered = true;
+      touchStartY = currentY;
+    }
+  }
+}, { passive: false });
+
+window.addEventListener("touchend", (e) => {
+  e.preventDefault();
+  input.left = false;
+  input.right = false;
+}, { passive: false });
+
+// UI Overlay & Suspense Chronometer
+const timerEl = document.getElementById("timer");
+const overlayEl = document.getElementById("overlay");
+const overlayTitle = document.getElementById("overlay-title");
+const overlaySub = document.getElementById("overlay-sub");
+
+function formatTime(t) {
+  const m = Math.floor(t / 60);
+  const s = Math.floor(t % 60);
+  const cs = Math.floor((t * 100) % 100);
+  return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0") + "." + String(cs).padStart(2, "0");
+}
+
+function showOverlay(title, sub) {
+  overlayTitle.textContent = title;
+  overlaySub.innerHTML = sub;
+  overlayEl.style.opacity = "1";
+}
+
+function hideOverlay() {
+  overlayEl.style.opacity = "0";
+}
+
+function resetGame() {
+  state.x = 0;
+  state.z = 1.0;
+  state.y = getRowElevation(1);
+  state.vx = 0;
+  state.vy = 0;
+  state.speed = BASE_SLIDE_SPEED;
+  state.grounded = true;
+  state.boostTimer = 0;
+  state.elapsedTime = 0;
+  state.jumpBuffered = false;
+  state.bankAngle = 0;
+
+  speedBoostData.forEach(b => b.alive = true);
+  jumpBoostData.forEach(b => b.alive = true);
+  warpBoostData.forEach(b => b.alive = true);
+
+  particles.forEach(p => p.life = 0);
+  avatarGroup.visible = true;
+  timerEl.textContent = "00:00.00";
+}
+
+function startOrRestart() {
+  initAudio();
+  resetGame();
+  state.mode = "SLIDING";
+  hideOverlay();
+}
+
+function crash(isMine) {
+  state.mode = "CRASHED";
+  sound.glide(0, false);
+  sound.explosion();
+  burstExplosion(state.x, state.y, state.z);
+  avatarGroup.visible = false;
+  showOverlay("CRASHED", "PRESS ARROW UP OR TAP TO RETRY");
+}
+
+function clearStage() {
+  state.mode = "CLEARED";
+  sound.glide(0, false);
+  sound.win();
+  showOverlay("STAGE CLEARED!", "FINAL TIME: " + formatTime(state.elapsedTime) + "<br><br>PRESS ARROW UP OR TAP TO PLAY AGAIN");
+}
+
+// ---------------------------------------------------------------------------
+// Main Kinematics & Physics Step
+// ---------------------------------------------------------------------------
+function updatePhysics(dt) {
+  state.elapsedTime += dt;
+
+  // Lateral steering with inertia and damping
+  const steer = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  state.vx += steer * STEER_SPEED * dt * 5.0;
+  state.vx *= Math.pow(STEER_DAMPING, dt * 60.0);
+  state.x += state.vx * dt;
+
+  // Track boundary clamping
+  const currentRow = Math.max(0, Math.min(LEVEL_CONFIG.total_rows - 1, Math.floor(state.z)));
+  let minCol = -1, maxCol = -1;
+  const gridRow = LEVEL_CONFIG.grid[currentRow];
+  for (let c = 0; c < W; c++) {
+    if (gridRow[c] !== 0) {
+      if (minCol < 0) minCol = c;
+      maxCol = c;
+    }
+  }
+  const minX = (minCol >= 0 ? minCol - 5.5 : -5.5);
+  const maxX = (maxCol >= 0 ? maxCol - 5.5 : 5.5);
+  if (state.x < minX) { state.x = minX; state.vx = 0; }
+  if (state.x > maxX) { state.x = maxX; state.vx = 0; }
+
+  // Forward downhill speed and boost acceleration
+  const currentSlope = getSlopeAtRow(currentRow);
+  let targetSpeed = BASE_SLIDE_SPEED + currentSlope * 40.0;
+  if (state.boostTimer > 0) {
+    targetSpeed *= BOOST_MULTIPLIER;
+    state.boostTimer -= dt;
+  }
+  state.speed += (targetSpeed - state.speed) * Math.min(1.0, dt * 3.5);
+  state.speed = Math.min(state.speed, MAX_SLIDE_SPEED); // Hard constraint <= 14.0
+  state.z += state.speed * dt;
+
+  // Jump Execution
+  if (state.jumpBuffered && state.grounded) {
+    state.vy = JUMP_FORCE;
+    state.grounded = false;
+    state.jumpBuffered = false;
+    sound.jump();
+  } else {
+    state.jumpBuffered = false;
+  }
+
+  // Vertical Gravity & Terrain Contact
+  const trackGroundY = getRowElevation(currentRow);
+  const isOverVoid = (minCol < 0 || state.x < minCol - 5.5 || state.x > maxCol - 5.5);
+
+  if (state.grounded) {
+    if (!isOverVoid && Math.abs(state.y - trackGroundY) < 0.6) {
+      state.y += (trackGroundY - state.y) * Math.min(1.0, dt * 25.0);
+      state.vy = 0;
+    } else {
+      state.grounded = false;
+    }
+  } else {
+    state.vy -= GRAVITY * dt;
+    state.y += state.vy * dt;
+    if (!isOverVoid && state.y <= trackGroundY && state.vy <= 0) {
+      if (trackGroundY - state.y > 1.2) {
+        crash(false);
+        return;
+      }
+      state.y = trackGroundY;
+      state.vy = 0;
+      state.grounded = true;
+    }
+  }
+
+  // Void Fall Fatal Threshold
+  if (state.y < trackGroundY - 12.0) {
+    crash(false);
+    return;
+  }
+
+  // Active Z-Window Collisions (Obstacles & Bonus Pickups)
+  for (let i = 0; i < obstacleData.length; i++) {
+    const obs = obstacleData[i];
+    if (Math.abs(obs.z - state.z) > 1.0) continue;
+    if (Math.abs(obs.x - state.x) < 0.75) {
+      if (state.y < obs.y + 0.6) {
+        crash(obs.type === 4);
+        return;
+      }
+    }
+  }
+
+  // Speed Boost Pickups
+  for (let i = 0; i < speedBoostData.length; i++) {
+    const b = speedBoostData[i];
+    if (!b.alive || Math.abs(b.z - state.z) > 1.0) continue;
+    if (Math.abs(b.x - state.x) < 0.85 && Math.abs(b.y - state.y) < 1.4) {
+      b.alive = false;
+      state.boostTimer = BOOST_DURATION;
+      sound.boost();
+    }
+  }
+
+  // Jump Boost Pickups
+  for (let i = 0; i < jumpBoostData.length; i++) {
+    const b = jumpBoostData[i];
+    if (!b.alive || Math.abs(b.z - state.z) > 1.0) continue;
+    if (Math.abs(b.x - state.x) < 0.85 && Math.abs(b.y - state.y) < 1.4) {
+      b.alive = false;
+      state.vy = SUPER_JUMP_FORCE;
+      state.grounded = false;
+      sound.boost();
+    }
+  }
+
+  // Warp Teleporter Pickups (Tactical Leap <= 10.0 units forward)
+  for (let i = 0; i < warpBoostData.length; i++) {
+    const b = warpBoostData[i];
+    if (!b.alive || Math.abs(b.z - state.z) > 1.0) continue;
+    if (Math.abs(b.x - state.x) < 0.85 && Math.abs(b.y - state.y) < 1.4) {
+      b.alive = false;
+      state.z += WARP_FORWARD_DISTANCE;
+      state.y += WARP_ALTITUDE_BOOST;
+      state.vy = 0;
+      state.grounded = false;
+      sound.warp();
+    }
+  }
+
+  // Stage Finish Check
+  if (state.z >= 356) {
+    clearStage();
+    return;
+  }
+
+  // Continuous Particle Trail Generation
+  const isBoosting = state.boostTimer > 0;
+  const trailColor = isBoosting ? COLOR_NEON_MAGENTA : (state.grounded ? COLOR_NEON_CYAN : COLOR_NEON_AMBER);
+  emitParticle(
+    state.x + (Math.random() - 0.5) * 0.35,
+    state.y + 0.1,
+    state.z - 0.45,
+    state.vx * 0.25,
+    0.2 + Math.random() * 0.4,
+    state.speed * 0.2,
+    trailColor,
+    0.55,
+    isBoosting ? 0.3 : 0.2
+  );
+
+  sound.glide(state.speed, true);
+}
+
+// ---------------------------------------------------------------------------
+// Camera Tracking & Scene Rendering Cycle
+// ---------------------------------------------------------------------------
+function updateCamera(dt) {
+  const currentSlope = getSlopeAtRow(Math.floor(state.z));
+  const slopeFactor = Math.min(1.0, currentSlope / 0.12);
+
+  // Pitch dynamic adaptation between 45° and 60°
+  const pitchAngle = ((45 + 15 * slopeFactor) * Math.PI) / 180;
+  const targetH = Math.min(CAMERA_HEIGHT, 3.8 + 1.1 * slopeFactor);
+  const targetD = Math.min(CAMERA_DISTANCE, targetH / Math.tan(pitchAngle));
+
+  const targetCamX = state.x;
+  const targetCamY = state.y + targetH;
+  const targetCamZ = state.z - targetD;
+
+  camera.position.x += (targetCamX - camera.position.x) * CAMERA_LERP;
+  camera.position.y += (targetCamY - camera.position.y) * CAMERA_LERP;
+  camera.position.z += (targetCamZ - camera.position.z) * CAMERA_LERP;
+
+  // Enforce Close Proximity Constraint: distance <= 6.5, height <= 5.0
+  const curDist = Math.hypot(camera.position.x - state.x, camera.position.z - state.z);
+  if (curDist > CAMERA_DISTANCE) {
+    const angle = Math.atan2(camera.position.z - state.z, camera.position.x - state.x);
+    camera.position.x = state.x + Math.cos(angle) * CAMERA_DISTANCE;
+    camera.position.z = state.z + Math.sin(angle) * CAMERA_DISTANCE;
+  }
+  if (camera.position.y - state.y > CAMERA_HEIGHT) {
+    camera.position.y = state.y + CAMERA_HEIGHT;
+  }
+
+  camera.lookAt(state.x, state.y + 0.35, state.z + 1.2);
+
+  // Sun and Shadow frustum tracking
+  sun.position.set(state.x - 14, state.y + 24, state.z - 10);
+  sun.target.position.set(state.x, state.y, state.z);
+}
+
+function updateBonusMeshes(time) {
+  function updateInstances(mesh, dataList) {
+    dataList.forEach((item, idx) => {
+      if (!item.alive) {
+        dummy.position.set(0, -9999, 0);
+        dummy.scale.set(0, 0, 0);
+      } else {
+        const hoverY = item.y + Math.sin(time * 3.5 + item.baseRow) * 0.15;
+        dummy.position.set(item.x, hoverY, item.z);
+        dummy.scale.setScalar(0.7);
+        dummy.rotation.x = time * 0.8;
+        dummy.rotation.y = time * 1.6;
+      }
+      dummy.updateMatrix();
+      mesh.setMatrixAt(idx, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  updateInstances(speedBoostMesh, speedBoostData);
+  updateInstances(jumpBoostMesh, jumpBoostData);
+  updateInstances(warpBoostMesh, warpBoostData);
+}
+
+function updateParticleTrail(dt) {
+  particles.forEach((p, idx) => {
+    let scale = 0;
+    if (p.life > 0) {
+      p.life -= dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.z += p.vz * dt;
+      p.vy -= 4.0 * dt;
+      scale = p.size * (p.life / p.maxLife);
+    }
+    dummy.position.set(p.x, p.y, p.z);
+    dummy.scale.setScalar(Math.max(0, scale));
+    dummy.updateMatrix();
+    particleMesh.setMatrixAt(idx, dummy.matrix);
+    particleMesh.setColorAt(idx, p.color);
+  });
+  particleMesh.instanceMatrix.needsUpdate = true;
+  if (particleMesh.instanceColor) particleMesh.instanceColor.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------------------
+// Animation Loop
+// ---------------------------------------------------------------------------
+let lastTime = performance.now();
+
+function animate(now) {
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, (now - lastTime) / 1000.0);
+  lastTime = now;
+  const time = now * 0.001;
+
+  if (state.mode === "SLIDING") {
+    updatePhysics(dt);
+  }
+
+  // Update Avatar Position & Dynamic Banking Tilt
+  avatarGroup.position.set(state.x, state.y, state.z);
+  state.bankAngle += (-state.vx * 0.055 - state.bankAngle) * Math.min(1.0, dt * 12.0);
+  avatarGroup.rotation.z = state.bankAngle;
+  avatarGroup.rotation.x = state.grounded
+    ? Math.atan(getSlopeAtRow(Math.floor(state.z)))
+    : Math.max(-0.4, Math.min(0.4, -state.vy * 0.05));
+
+  updateCamera(dt);
+  updateBonusMeshes(time);
+  updateParticleTrail(dt);
+
+  // Suspense Chronometer HUD
+  timerEl.textContent = formatTime(state.elapsedTime);
+
+  renderer.render(scene, camera);
+}
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Initial Setup
+resetGame();
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

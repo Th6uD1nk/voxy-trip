@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Voxy Trip — Neon Canyon Descent</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#07000d;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+#game{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+#hud{position:fixed;top:16px;left:18px;z-index:3;color:#00f3ff;text-shadow:0 0 8px #00f3ff;font-weight:700;letter-spacing:.12em}
+#timer{font-size:24px}
+#state{margin-top:6px;font-size:11px;color:#ffaa00}
+#message{position:fixed;inset:0;display:grid;place-items:center;z-index:4;pointer-events:none;color:#fff;text-align:center}
+#message>div{padding:18px 24px;border:1px solid rgba(0,243,255,.5);background:rgba(5,0,15,.7);box-shadow:0 0 28px rgba(0,243,255,.2);text-shadow:0 0 10px #00f3ff}
+#message b{display:block;font-size:30px;letter-spacing:.14em;color:#00f3ff}
+#message span{display:block;margin-top:8px;font-size:12px;color:#ffaa00}
+#touch{position:fixed;inset:0;z-index:2;display:none}
+@media (pointer:coarse){#touch{display:block}}
+#touch .zone{position:absolute;top:0;bottom:0;width:50%}
+#touch .left{left:0}.right{right:0}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud"><div id="timer">00:00.00</div><div id="state">READY</div></div>
+<div id="message"><div><b>VOXY TRIP</b><span>ARROW KEYS / TOUCH TO SLIDE</span></div></div>
+<div id="touch"><div class="zone left"></div><div class="zone right"></div></div>
+<script>
+/*
+ Embedded local 3D runtime exposing the subset of the Three.js API used by this
+ standalone game. No network resources, textures, fonts, audio files, or imports.
+*/
+const THREE=(()=>{
+  const DEG=Math.PI/180;
+  class Vector3{
+    constructor(x=0,y=0,z=0){this.x=x;this.y=y;this.z=z}
+    set(x,y,z){this.x=x;this.y=y;this.z=z;return this}
+    copy(v){this.x=v.x;this.y=v.y;this.z=v.z;return this}
+    clone(){return new Vector3(this.x,this.y,this.z)}
+    add(v){this.x+=v.x;this.y+=v.y;this.z+=v.z;return this}
+    sub(v){this.x-=v.x;this.y-=v.y;this.z-=v.z;return this}
+    multiplyScalar(s){this.x*=s;this.y*=s;this.z*=s;return this}
+    lerp(v,a){this.x+=(v.x-this.x)*a;this.y+=(v.y-this.y)*a;this.z+=(v.z-this.z)*a;return this}
+  }
+  class Euler{constructor(x=0,y=0,z=0){this.x=x;this.y=y;this.z=z}}
+  class Color{
+    constructor(hex=0xffffff){this.set(hex)}
+    set(hex){this.hex=typeof hex==="number"?hex:parseInt(String(hex).replace("#",""),16);return this}
+    rgb(){return[(this.hex>>16&255)/255,(this.hex>>8&255)/255,(this.hex&255)/255]}
+  }
+  class Object3D{
+    constructor(){this.position=new Vector3();this.rotation=new Euler();this.scale=new Vector3(1,1,1);this.children=[];this.parent=null;this.visible=true}
+    add(...xs){for(const x of xs){this.children.push(x);x.parent=this}return this}
+    remove(x){const i=this.children.indexOf(x);if(i>=0)this.children.splice(i,1);x.parent=null}
+  }
+  class Group extends Object3D{}
+  class Scene extends Group{constructor(){super();this.background=new Color(0x07000d)}}
+  class PerspectiveCamera extends Object3D{
+    constructor(fov=60,aspect=1,near=.1,far=1000){super();this.fov=fov;this.aspect=aspect;this.near=near;this.far=far;this.target=new Vector3()}
+    lookAt(v){this.target.copy(v)}
+    updateProjectionMatrix(){}
+  }
+  class BoxGeometry{constructor(w=1,h=1,d=1){this.width=w;this.height=h;this.depth=d}}
+  class MeshStandardMaterial{constructor(o={}){this.color=new Color(o.color??0xffffff);this.emissive=new Color(o.emissive??0);this.emissiveIntensity=o.emissiveIntensity??0;this.metalness=o.metalness??0;this.roughness=o.roughness??1}}
+  class MeshBasicMaterial extends MeshStandardMaterial{}
+  class Mesh extends Object3D{constructor(g,m){super();this.geometry=g;this.material=m}}
+  class InstancedMesh extends Mesh{
+    constructor(g,m,count){super(g,m);this.count=count;this.matrices=new Array(count);this.colors=new Array(count)}
+    setMatrixAt(i,m){this.matrices[i]=m}
+    setColorAt(i,c){this.colors[i]=c}
+  }
+  class Matrix4{
+    constructor(){this.p={x:0,y:0,z:0,sx:1,sy:1,sz:1,rx:0,ry:0,rz:0}}
+    compose(p,r,s){this.p={x:p.x,y:p.y,z:p.z,sx:s.x,sy:s.y,sz:s.z,rx:r.x,ry:r.y,rz:r.z};return this}
+  }
+  class AmbientLight extends Object3D{constructor(color,intensity){super();this.color=new Color(color);this.intensity=intensity}}
+  class DirectionalLight extends Object3D{constructor(color,intensity){super();this.color=new Color(color);this.intensity=intensity;this.castShadow=false;this.shadow={mapSize:{x:512,y:512},camera:{left:-20,right:20,top:20,bottom:-20,near:1,far:100}}}}
+  class WebGLRenderer{
+    constructor({canvas,antialias=true}={}){this.domElement=canvas;this.gl=canvas.getContext("webgl",{antialias,alpha:false,preserveDrawingBuffer:false});this.shadowMap={enabled:false,type:0};this.outputColorSpace="srgb";this._fallback=!this.gl;this.ctx=this._fallback?canvas.getContext("2d"):null}
+    setPixelRatio(v){this.pixelRatio=Math.min(v,2)}
+    setSize(w,h){this.width=w;this.height=h;this.domElement.width=Math.floor(w*(this.pixelRatio||1));this.domElement.height=Math.floor(h*(this.pixelRatio||1));if(this.gl)this.gl.viewport(0,0,this.domElement.width,this.domElement.height)}
+    render(scene,camera){if(this._fallback)return this._render2d(scene,camera);drawScene(this.gl,scene,camera,this.domElement)}
+    _render2d(scene,camera){const c=this.ctx,w=this.domElement.width,h=this.domElement.height;c.fillStyle="#08000f";c.fillRect(0,0,w,h)}
+  }
+  return {Vector3,Euler,Color,Object3D,Group,Scene,PerspectiveCamera,BoxGeometry,MeshStandardMaterial,MeshBasicMaterial,Mesh,InstancedMesh,Matrix4,AmbientLight,DirectionalLight,WebGLRenderer,DEG};
+})();
+
+const VOXEL_SIZE=1.0, GRAVITY=16.0, BASE_SLIDE_SPEED=7.0, MAX_SLIDE_SPEED=14.0;
+const JUMP_FORCE=6.5, SUPER_JUMP_FORCE=12.0, BOOST_MULTIPLIER=1.35, BOOST_DURATION=2.0;
+const WARP_FORWARD_DISTANCE=10.0, WARP_ALTITUDE_BOOST=3.5, STEER_SPEED=13.0, STEER_DAMPING=0.86;
+const CAMERA_DISTANCE=5.5, CAMERA_HEIGHT=4.2, CAMERA_LERP=0.1;
+const COLOR_CANYON_SAND=0xd97736, COLOR_CANYON_ROCK=0x8b3a1a, COLOR_NEON_CYAN=0x00f3ff;
+const COLOR_NEON_LIME=0x39ff14, COLOR_NEON_MAGENTA=0xff007f, COLOR_NEON_AMBER=0xffaa00, COLOR_AVATAR=0x00ffff;
+const MIN_OBSTACLE_SPACING_ROWS=10, ACTIVE_WINDOW_BACK=15.0, ACTIVE_WINDOW_FRONT=85.0;
+
+/* Portable, renderer-independent course data. */
+const LEVEL_CONFIG={
+  name:"Neon Canyon Descent",
+  width:12,
+  total_rows:360,
+  slope_profile:[0.025,0.04,0.055,0.11,0.08],
+  grid:[[1,1,1,1,1,8,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,5,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1,1,1,1,1],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,3,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,3,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,3,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,3,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,3,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,3,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,5,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,4,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,5,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,4,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,5,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,4,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,5,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,4,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,7,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,0,1,1,1,1,1,1,0,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,6,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,4,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,6,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,6,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,4,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,1,1,1,1,0,0],[0,0,1,1,1,1,9,1,1,1,0,0]]
+};
+const PHASES=[
+  {start:0,end:69,name:"INITIATION SLOPE",width:12,baseY:0,slope:.025},
+  {start:70,end:149,name:"NARROW CANYON CHASM",width:6,baseY:-1,slope:.04},
+  {start:150,end:229,name:"MINEFIELD ALLEY",width:8,baseY:-4,slope:.055},
+  {start:230,end:289,name:"THE GREAT ABYSS LEAP",width:8,baseY:-9,slope:.11},
+  {start:290,end:359,name:"FINAL DOWNHILL SPRINT",width:8,baseY:-15,slope:.08}
+];
+
+const canvas=document.getElementById("game"), renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setPixelRatio(devicePixelRatio);
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(62,innerWidth/innerHeight,.1,500);
+const ambient=new THREE.AmbientLight(0x8a6d9d,.65);
+const sun=new THREE.DirectionalLight(0xffc27a,1.25);
+sun.castShadow=true;sun.shadow.mapSize.x=1024;sun.shadow.mapSize.y=1024;
+scene.add(ambient,sun);
+
+function resize(){renderer.setSize(innerWidth,innerHeight);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix()}
+addEventListener("resize",resize);resize();
+
+const gl=renderer.gl;
+const shaderVS=`attribute vec3 aPosition;attribute vec3 aNormal;attribute vec3 aColor;
+uniform mat4 uVP;uniform vec3 uOffset;uniform vec3 uScale;uniform float uRotY;varying vec3 vColor;varying float vLight;
+void main(){float c=cos(uRotY),s=sin(uRotY);vec3 p=aPosition*uScale;vec3 q=vec3(p.x*c-p.z*s,p.y,p.x*s+p.z*c)+uOffset;
+vec3 n=normalize(aNormal);vLight=.35+.65*max(0.,dot(n,normalize(vec3(-.4,1.,-.3))));vColor=aColor;gl_Position=uVP*vec4(q,1.);}`;
+const shaderFS=`precision mediump float;varying vec3 vColor;varying float vLight;void main(){gl_FragColor=vec4(vColor*vLight,1.);}`;
+let prog=null,loc=null,bufPos=null,bufNor=null,bufCol=null;
+function initGL(){
+ if(!gl)return;
+ function compile(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);return s}
+ prog=gl.createProgram();gl.attachShader(prog,compile(gl.VERTEX_SHADER,shaderVS));gl.attachShader(prog,compile(gl.FRAGMENT_SHADER,shaderFS));gl.linkProgram(prog);
+ loc={aPosition:gl.getAttribLocation(prog,"aPosition"),aNormal:gl.getAttribLocation(prog,"aNormal"),aColor:gl.getAttribLocation(prog,"aColor"),uVP:gl.getUniformLocation(prog,"uVP"),uOffset:gl.getUniformLocation(prog,"uOffset"),uScale:gl.getUniformLocation(prog,"uScale"),uRotY:gl.getUniformLocation(prog,"uRotY")};
+ const verts=[],norms=[];
+ const faces=[
+  [[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1],[0,0,1]],
+  [[1,-1,-1],[-1,-1,-1],[-1,1,-1],[1,1,-1],[0,0,-1]],
+  [[-1,1,1],[1,1,1],[1,1,-1],[-1,1,-1],[0,1,0]],
+  [[-1,-1,-1],[1,-1,-1],[1,-1,1],[-1,-1,1],[0,-1,0]],
+  [[1,-1,1],[1,-1,-1],[1,1,-1],[1,1,1],[1,0,0]],
+  [[-1,-1,-1],[-1,-1,1],[-1,1,1],[-1,1,-1],[-1,0,0]]
+ ];
+ for(const f of faces){const q=f.slice(0,4),n=f[4];for(const idx of [0,1,2,0,2,3]){verts.push(...q[idx]);norms.push(...n)}}
+ bufPos=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,bufPos);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(verts),gl.STATIC_DRAW);
+ bufNor=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,bufNor);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(norms),gl.STATIC_DRAW);
+}
+initGL();
+
+function perspective(fov,aspect,near,far){
+ const f=1/Math.tan(fov*Math.PI/360),nf=1/(near-far);
+ return [f/aspect,0,0,0,0,f,0,0,0,0,(far+near)*nf,-1,0,0,2*far*near*nf,0];
+}
+function lookAt(eye,target){
+ let z=[eye.x-target.x,eye.y-target.y,eye.z-target.z],zl=Math.hypot(...z);z=z.map(v=>v/zl);
+ let x=[z[2],0,-z[0]],xl=Math.hypot(...x);x=x.map(v=>v/xl);
+ let y=[z[1]*x[2]-z[2]*x[1],z[2]*x[0]-z[0]*x[2],z[0]*x[1]-z[1]*x[0]];
+ return [x[0],y[0],z[0],0,x[1],y[1],z[1],0,x[2],y[2],z[2],0,-(x[0]*eye.x+x[1]*eye.y+x[2]*eye.z),-(y[0]*eye.x+y[1]*eye.y+y[2]*eye.z),-(z[0]*eye.x+z[1]*eye.y+z[2]*eye.z),1];
+}
+function mul(a,b){const r=new Array(16).fill(0);for(let c=0;c<4;c++)for(let r0=0;r0<4;r0++)for(let k=0;k<4;k++)r[c*4+r0]+=a[k*4+r0]*b[c*4+k];return r}
+function hexRGB(h){return[(h>>16&255)/255,(h>>8&255)/255,(h&255)/255]}
+function drawCube(x,y,z,sx,sy,sz,color,rot=0){
+ if(!gl)return;
+ gl.useProgram(prog);
+ gl.bindBuffer(gl.ARRAY_BUFFER,bufPos);gl.enableVertexAttribArray(loc.aPosition);gl.vertexAttribPointer(loc.aPosition,3,gl.FLOAT,false,0,0);
+ gl.bindBuffer(gl.ARRAY_BUFFER,bufNor);gl.enableVertexAttribArray(loc.aNormal);gl.vertexAttribPointer(loc.aNormal,3,gl.FLOAT,false,0,0);
+ gl.uniform3f(loc.uOffset,x,y,z);gl.uniform3f(loc.uScale,sx,sy,sz);gl.uniform1f(loc.uRotY,rot);
+
+ gl.vertexAttrib3f(loc.aColor,...hexRGB(color));
+ gl.drawArrays(gl.TRIANGLES,0,36);
+}
+function drawScene(g,c,dom){
+ g.enable(g.DEPTH_TEST);g.clearColor(.015,.002,.03,1);g.clear(g.COLOR_BUFFER_BIT|g.DEPTH_BUFFER_BIT);
+ const vp=mul(perspective(c.fov,c.aspect,c.near,c.far),lookAt(c.position,c.target));
+ g.useProgram(prog);g.uniformMatrix4fv(loc.uVP,false,new Float32Array(vp));
+ const z0=player.z-ACTIVE_WINDOW_BACK,z1=player.z+ACTIVE_WINDOW_FRONT;
+ const rowMin=Math.max(0,Math.floor((-z1)/1)),rowMax=Math.min(LEVEL_CONFIG.total_rows-1,Math.ceil((-z0)/1));
+ for(let row=Math.max(0,Math.floor(player.row-ACTIVE_WINDOW_FRONT));row<=Math.min(LEVEL_CONFIG.total_rows-1,Math.ceil(player.row+ACTIVE_WINDOW_FRONT));row++){
+   if(row>=70&&row<150){ const wy=groundY(row)+1.5; const wz=-row; drawCube(-6.7,wy,wz,1.2,1.5,0.5,COLOR_CANYON_ROCK); drawCube(6.7,wy,wz,1.2,1.5,0.5,COLOR_CANYON_ROCK); }
+   const r=LEVEL_CONFIG.grid[row],z=-row;
+   for(let col=0;col<W;col++){
+     const id=r[col]; if(id===0)continue;
+     let color=COLOR_CANYON_SAND;
+     if(id===3)color=COLOR_CANYON_ROCK;
+     else if(id===4)color=0x221111;
+     else if(id===5)color=COLOR_NEON_CYAN;
+     else if(id===6)color=COLOR_NEON_LIME;
+     else if(id===7)color=COLOR_NEON_MAGENTA;
+     else if(id===8||id===9)color=COLOR_NEON_AMBER;
+     let yy=groundY(row)+.0;
+     if(id>=5&&id<=7){yy+=1.15+Math.sin(now*.004+row)*.12;drawCube(col-5.5,yy,z,.35,.35,.35,color,now*.002)}
+     else if(id===8||id===9){drawCube(col-5.5,yy+2,z,.25,2,.25,color);if(col===5)drawCube(col-5.5,yy+4,z,.25,.25,.25,color)}
+     else drawCube(col-5.5,yy-.5,z,.5,.5,.5,color);
+   }
+ }
+ drawAvatar();
+ for(const p of particles)drawCube(p.x,p.y,p.z,p.s,p.s,p.s,p.color,p.rot);
+}
+function groundY(row){let y=0;for(const p of PHASES)if(row>=p.start)y=p.baseY-(row-p.start)*p.slope;return y}
+function phaseForRow(r){return PHASES.find(p=>r>=p.start&&r<=p.end)||PHASES[4]}
+
+const voxelGeometry=new THREE.BoxGeometry(VOXEL_SIZE,VOXEL_SIZE,VOXEL_SIZE);
+const floorInstances=new THREE.InstancedMesh(voxelGeometry,new THREE.MeshStandardMaterial({color:COLOR_CANYON_SAND}),LEVEL_CONFIG.total_rows*LEVEL_CONFIG.width);
+const wallInstances=new THREE.InstancedMesh(voxelGeometry,new THREE.MeshStandardMaterial({color:COLOR_CANYON_ROCK}),LEVEL_CONFIG.total_rows*LEVEL_CONFIG.width);
+const itemInstances=new THREE.InstancedMesh(voxelGeometry,new THREE.MeshStandardMaterial({color:COLOR_NEON_CYAN,emissive:COLOR_NEON_CYAN,emissiveIntensity:1}),LEVEL_CONFIG.total_rows*LEVEL_CONFIG.width);
+scene.add(floorInstances,wallInstances,itemInstances);
+let fi=0,wi=0,ii=0;
+for(let r=0;r<LEVEL_CONFIG.total_rows;r++){for(let c=0;c<LEVEL_CONFIG.width;c++){const id=LEVEL_CONFIG.grid[r][c];const m=new THREE.Matrix4().compose(new THREE.Vector3(c-5.5,groundY(r)-0.5,-r),new THREE.Euler(),new THREE.Vector3(0.5,0.5,0.5));if(id===1||id===2)floorInstances.setMatrixAt(fi++,m);else if(id===3||id===4)wallInstances.setMatrixAt(wi++,m);else if(id>=5&&id<=7)itemInstances.setMatrixAt(ii++,m);}}
+const avatar=new THREE.Group(), player={x:0,y:1,z:0,row:0,vy:0,vx:0,forward:BASE_SLIDE_SPEED,grounded:true,boostUntil:0,state:"READY",warp:false};
+const avatarCore=new THREE.Mesh(new THREE.BoxGeometry(1,1,1),new THREE.MeshStandardMaterial({color:COLOR_AVATAR,emissive:COLOR_AVATAR,emissiveIntensity:.3}));
+avatar.add(avatarCore);scene.add(avatar);
+function drawAvatar(){
+ const c=hexRGB(COLOR_AVATAR);drawCube(player.x,player.y,player.z,.55,.65,.55,COLOR_AVATAR,avatar.rotation.y);
+ drawCube(player.x,player.y+.18,player.z-.48,.32,.18,.06,COLOR_NEON_CYAN,avatar.rotation.y);
+}
+
+let keys={left:false,right:false},lastTime=performance.now(),elapsed=0,startTime=performance.now(),now=performance.now();
+const particles=[];let particleAccumulator=0;
+function emitTrail(dt){
+ particleAccumulator+=dt;
+ if(particleAccumulator>=.025){particleAccumulator=0;const airborne=!player.grounded;particles.push({x:player.x,y:player.y-.55,z:player.z+.35,s:.12,color:airborne?COLOR_NEON_AMBER:(player.boostUntil>now?COLOR_NEON_MAGENTA:COLOR_NEON_CYAN),life:.6,rot:Math.random()*6.28})}
+ for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.life-=dt;p.z+=player.forward*dt*.12;p.y-=dt*.4;p.s*=Math.pow(.05,dt);p.rot+=dt*3;if(p.life<=0)particles.splice(i,1)}
+}
+function nearestRow(){return Math.max(0,Math.min(LEVEL_CONFIG.total_rows-1,Math.round(-player.z)))}
+function rowYAt(r){return groundY(r)}
+function collision(){
+ const r=nearestRow(),grid=LEVEL_CONFIG.grid[r],c=Math.max(0,Math.min(W-1,Math.floor(player.x+W/2)));
+ const id=grid[c]||0;
+ if(id===3||id===4){crash(id===4);return}
+ if(id===5){activateBoost();grid[c]=1}
+ if(id===6){player.vy=SUPER_JUMP_FORCE;player.grounded=false;grid[c]=1;audio.jump()}
+ if(id===7){grid[c]=1;player.z-=Math.min(WARP_FORWARD_DISTANCE,10);player.y+=WARP_ALTITUDE_BOOST;player.vy=0;player.grounded=false;player.warp=true;audio.warp()}
+ if(id===9){win()}
+}
+function activateBoost(){player.boostUntil=now+BOOST_DURATION*1000;audio.boost()}
+function crash(explode){
+ if(player.state!=="SLIDING")return;player.state="CRASHED";document.getElementById("state").textContent="CRASHED";audio.crash(explode);document.getElementById("message").innerHTML="<div><b>CRASHED</b><span>ARROW UP OR TAP TO RESTART</span></div>"
+}
+function win(){
+ if(player.state!=="SLIDING")return;player.state="CLEARED";audio.win();const t=formatTime(elapsed);document.getElementById("state").textContent="CLEARED";document.getElementById("message").innerHTML="<div><b>FINISH</b><span>"+t+"</span><span>ARROW UP OR TAP TO RESTART</span></div>"
+}
+function reset(){
+ player.x=0;player.row=0;player.z=0;player.y=groundY(0)+1;player.vy=0;player.vx=0;player.forward=BASE_SLIDE_SPEED;player.grounded=true;player.boostUntil=0;player.state="SLIDING";player.warp=false;particles.length=0;elapsed=0;startTime=performance.now();document.getElementById("state").textContent="SLIDING";document.getElementById("message").innerHTML="<div><b>VOXY TRIP</b><span>ARROW KEYS / TOUCH TO SLIDE</span></div>";setTimeout(()=>document.getElementById("message").innerHTML="",500)}
+function jump(){
+ if(player.state==="CRASHED"||player.state==="CLEARED"){reset();return}
+ if(player.state!=="SLIDING")return;
+ if(player.grounded){player.vy=JUMP_FORCE;player.grounded=false;audio.jump()}
+}
+function update(dt){
+ if(player.state!=="SLIDING")return;
+ player.row=nearestRow();
+ elapsed=(performance.now()-startTime)/1000;
+ const r=nearestRow(),phase=phaseForRow(r),slope=phase.slope;
+ player.forward=Math.min(MAX_SLIDE_SPEED,Math.max(BASE_SLIDE_SPEED,player.forward+slope*22*dt));
+ if(player.boostUntil>now)player.forward=Math.min(MAX_SLIDE_SPEED,player.forward*BOOST_MULTIPLIER);
+ const steer=(keys.right?1:0)-(keys.left?1:0);
+ player.vx=player.vx*STEER_DAMPING+steer*STEER_SPEED*dt;
+ player.x+=player.vx*dt;player.x=Math.max(-4.3,Math.min(4.3,player.x));
+ player.z-=player.forward*dt;
+ player.vy-=GRAVITY*dt;
+ player.y+=player.vy*dt;
+ const gy=groundY(nearestRow())+1;
+ if(player.y<=gy&&!player.warp){player.y=gy;player.vy=0;player.grounded=true}else if(player.y<=gy&&player.vy<=0){player.y=gy;player.vy=0;player.grounded=true;player.warp=false}
+ if(player.y<-12){crash(false)}
+ collision();emitTrail(dt);
+ avatar.rotation.z=-player.vx*.045;avatar.rotation.y=player.vx*.035;
+ audio.glide(player.forward);
+}
+function updateCamera(){
+ const slope=phaseForRow(nearestRow()).slope;
+ const pitchDeg=Math.max(45,Math.min(60,45+slope*110));
+ const pitch=pitchDeg*Math.PI/180;
+ const dist=Math.min(4.5,Math.max(4.2,4.5-slope*1.2));
+ const height=Math.min(4.6,Math.max(4.2,4.5+slope*1.0));
+ const target=new THREE.Vector3(player.x,player.y+.35,player.z-2);
+ const desired=new THREE.Vector3(player.x,player.y+height*Math.sin(pitch),player.z+dist*Math.cos(pitch));
+ camera.position.lerp(desired,CAMERA_LERP);camera.lookAt(target);sun.position.set(player.x+8,player.y+14,player.z+5)
+}
+function formatTime(t){const m=Math.floor(t/60),s=Math.floor(t%60),h=Math.floor((t%1)*100);return String(m).padStart(2,"0")+":"+String(s).padStart(2,"0")+"."+String(h).padStart(2,"0")}
+document.getElementById("timer").textContent="00:00.00";
+
+const audio=(()=>{
+ let ctx=null,wind=null,windGain=null,windFilter=null;
+ function ensure(){if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)();if(ctx.state==="suspended")ctx.resume()}
+ function noiseBuffer(){const b=ctx.createBuffer(1,ctx.sampleRate,ctx.sampleRate);const d=b.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;return b}
+ function glide(speed){ensure();if(!wind){wind=ctx.createBufferSource();wind.buffer=noiseBuffer();wind.loop=true;windFilter=ctx.createBiquadFilter();windFilter.type="bandpass";windGain=ctx.createGain();windGain.gain.value=.025;wind.connect(windFilter).connect(windGain).connect(ctx.destination);wind.start()}
+ const f=400+(Math.min(MAX_SLIDE_SPEED,speed)-BASE_SLIDE_SPEED)/(MAX_SLIDE_SPEED-BASE_SLIDE_SPEED)*1400;windFilter.frequency.setTargetAtTime(f,ctx.currentTime,.05)}
+ function tone(a,b,d,type="triangle"){ensure();const o=ctx.createOscillator(),g=ctx.createGain();o.type=type;o.frequency.setValueAtTime(a,ctx.currentTime);o.frequency.exponentialRampToValueAtTime(Math.max(1,b),ctx.currentTime+d);g.gain.setValueAtTime(.001,ctx.currentTime);g.gain.exponentialRampToValueAtTime(.18,ctx.currentTime+.01);g.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+d);o.connect(g).connect(ctx.destination);o.start();o.stop(ctx.currentTime+d+.02)}
+ function jump(){tone(200,650,.12,"sine")}
+ function boost(){tone(440,880,.25,"triangle");setTimeout(()=>tone(880,1320,.18,"triangle"),80)}
+ function warp(){ensure();const o=ctx.createOscillator(),g=ctx.createGain();o.type="sine";o.frequency.setValueAtTime(800,ctx.currentTime);o.frequency.exponentialRampToValueAtTime(200,ctx.currentTime+.45);g.gain.setValueAtTime(.001,ctx.currentTime);g.gain.exponentialRampToValueAtTime(.22,ctx.currentTime+.02);g.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+.48);o.connect(g).connect(ctx.destination);o.start();o.stop(ctx.currentTime+.5)}
+ function crash(){ensure();const s=ctx.createBufferSource(),g=ctx.createGain(),f=ctx.createBiquadFilter();s.buffer=noiseBuffer();f.type="lowpass";f.frequency.value=80;g.gain.setValueAtTime(.35,ctx.currentTime);g.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+.4);s.connect(f).connect(g).connect(ctx.destination);s.start();s.stop(ctx.currentTime+.41)}
+ function win(){[523.25,659.25,783.99,1046.5].forEach((f,i)=>setTimeout(()=>tone(f,f*1.01,.32,"square"),i*150))}
+ return {glide,jump,boost,warp,crash,win}
+})();
+
+function keydown(e){
+ if(e.key!=="ArrowLeft"&&e.key!=="ArrowRight"&&e.key!=="ArrowUp")return;
+ e.preventDefault();
+ if(e.key==="ArrowLeft")keys.left=true;
+ if(e.key==="ArrowRight")keys.right=true;
+ if(e.key==="ArrowUp")jump();
+}
+function keyup(e){
+ if(e.key!=="ArrowLeft"&&e.key!=="ArrowRight"&&e.key!=="ArrowUp")return;
+ e.preventDefault();
+ if(e.key==="ArrowLeft")keys.left=false;
+ if(e.key==="ArrowRight")keys.right=false;
+}
+addEventListener("keydown",keydown,{passive:false});addEventListener("keyup",keyup,{passive:false});
+
+let touchStart=null;
+function touchstart(e){
+ e.preventDefault();
+ if(player.state==="CRASHED"||player.state==="CLEARED"){reset();return}
+ if(e.touches.length>=2){jump();return}
+ const t=e.touches[0];touchStart={x:t.clientX,y:t.clientY};
+ if(t.clientX<innerWidth/2)keys.left=true;else keys.right=true;
+}
+function touchend(e){
+ e.preventDefault();
+ if(touchStart&&e.changedTouches[0]){
+  const t=e.changedTouches[0],dy=t.clientY-touchStart.y;
+  if(dy<-40)jump();
+ }
+ keys.left=false;keys.right=false;touchStart=null;
+}
+addEventListener("touchstart",touchstart,{passive:false});addEventListener("touchend",touchend,{passive:false});
+
+function frame(t){
+ now=t;const dt=Math.min(.033,(t-lastTime)/1000);lastTime=t;
+ update(dt);updateCamera();
+ document.getElementById("timer").textContent=formatTime(elapsed);
+ renderer.render(scene,camera);
+ requestAnimationFrame(frame)
+}
+reset();player.y=groundY(0)+1;camera.position.set(0,4.2,5.5);camera.lookAt(new THREE.Vector3(0,1,-2));
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

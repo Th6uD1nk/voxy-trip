@@ -1,0 +1,1153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Voxy Trip — Neon Canyon Descent</title>
+<style>
+  html, body { margin:0; padding:0; overflow:hidden; background:#1a0a1e; height:100%; width:100%; touch-action:none; }
+  canvas { display:block; }
+  #hud {
+    position:fixed; top:14px; left:14px; z-index:10;
+    font-family:'Courier New', monospace;
+    color:#ffaa00; font-size:26px; font-weight:bold;
+    text-shadow:0 0 8px #ffaa00, 0 0 18px #ff007f;
+    letter-spacing:2px; pointer-events:none; user-select:none;
+  }
+  #hud .label { font-size:10px; color:#00f3ff; letter-spacing:5px; text-shadow:0 0 6px #00f3ff; }
+  #msg {
+    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    z-index:20; text-align:center; font-family:'Courier New', monospace;
+    color:#00f3ff; font-size:46px; font-weight:bold;
+    text-shadow:0 0 20px #00f3ff, 0 0 44px #ff007f;
+    pointer-events:none; opacity:0; transition:opacity 0.35s;
+    user-select:none; white-space:nowrap;
+  }
+  #msg.show { opacity:1; }
+  #msg .sub { display:block; font-size:15px; color:#ffaa00; margin-top:14px; letter-spacing:3px; }
+</style>
+</head>
+<body>
+<div id="hud"><span class="label">TIME</span><br><span id="timer">00:00.00</span></div>
+<div id="msg"></div>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* ============================================================
+   GLOBALS
+   ============================================================ */
+const VOXEL_SIZE = 1.0;
+const GRAVITY = 16.0;
+const BASE_SLIDE_SPEED = 7.0;
+const MAX_SLIDE_SPEED = 14.0;
+const JUMP_FORCE = 6.5;
+const SUPER_JUMP_FORCE = 12.0;
+const BOOST_MULTIPLIER = 1.35;
+const BOOST_DURATION = 2.0;
+const WARP_FORWARD_DISTANCE = 10.0;
+const WARP_ALTITUDE_BOOST = 3.5;
+const STEER_SPEED = 13.0;
+const STEER_DAMPING = 0.86;
+const CAMERA_DISTANCE = 5.5;
+const CAMERA_HEIGHT = 4.2;
+const CAMERA_LERP = 0.1;
+
+const COLOR_CANYON_SAND = 0xd97736;
+const COLOR_CANYON_ROCK = 0x8b3a1a;
+const COLOR_NEON_CYAN = 0x00f3ff;
+const COLOR_NEON_LIME = 0x39ff14;
+const COLOR_NEON_MAGENTA = 0xff007f;
+const COLOR_NEON_AMBER = 0xffaa00;
+const COLOR_AVATAR = 0x00ffff;
+
+const MIN_OBSTACLE_SPACING_ROWS = 10;
+const ACTIVE_WINDOW_BACK = 15.0;
+const ACTIVE_WINDOW_FRONT = 85.0;
+const CHUNK_ROWS = 50;
+
+const TILE_PIT = 0, TILE_FLOOR = 1, TILE_RAMP = 2, TILE_BOULDER = 3,
+      TILE_MINE = 4, TILE_SPEED = 5, TILE_JUMP = 6, TILE_WARP = 7,
+      TILE_START = 8, TILE_FINISH = 9;
+
+/* ============================================================
+   STRICT PORTABLE LEVEL FORMAT
+   Pure data — engine-agnostic. Decoupled from rendering.
+   ============================================================ */
+function generateLevelData() {
+  const W = 12;
+  const ROWS = 360;
+
+  const slope_profile = [
+    { from: 0,   to: 69,  slope: -0.15, phase: 1, name: "Initiation Slope" },
+    { from: 70,  to: 149, slope: -0.20, phase: 2, name: "Narrow Canyon Chasm" },
+    { from: 150, to: 229, slope: -0.22, phase: 3, name: "Minefield Alley" },
+    { from: 230, to: 289, slope: -0.25, phase: 4, name: "The Great Abyss Leap" },
+    { from: 290, to: 359, slope: -0.35, phase: 5, name: "Final Downhill Sprint" }
+  ];
+
+  const slopeDeltas = new Array(ROWS).fill(0);
+  for (const seg of slope_profile) {
+    for (let r = seg.from; r <= seg.to && r < ROWS; r++) slopeDeltas[r] = seg.slope;
+  }
+
+  const surfaceY = new Array(ROWS);
+  surfaceY[0] = 0;
+  for (let r = 1; r < ROWS; r++) surfaceY[r] = surfaceY[r - 1] + slopeDeltas[r - 1];
+
+  const grid = [];
+  for (let r = 0; r < ROWS; r++) grid.push(new Array(W).fill(TILE_PIT));
+
+  // Deterministic PRNG for reproducible track
+  let seed = 20241111;
+  const rng = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+
+  const trackBounds = (r) => {
+    if (r >= 70 && r < 150) return [3, 8];   // Phase 2: 6-wide narrow canyon
+    return [0, W - 1];                        // Phases 1, 3, 4, 5: full width
+  };
+
+  // Fill track floor
+  for (let r = 0; r < ROWS; r++) {
+    const [ts, te] = trackBounds(r);
+    const isPitGap = (r >= 258 && r <= 268);
+    for (let x = ts; x <= te; x++) {
+      if (isPitGap) { grid[r][x] = TILE_PIT; continue; }
+      const steep = (r >= 290);
+      grid[r][x] = steep ? TILE_RAMP : TILE_FLOOR;
+    }
+  }
+
+  // Start gate (row 0) & Finish gate (row ROWS-1)
+  for (let x = 0; x < W; x++) grid[0][x] = TILE_START;
+  for (let x = 0; x < W; x++) grid[ROWS - 1][x] = TILE_FINISH;
+
+  // Obstacles (strict navigability)
+  let lastObstacleRow = -1000;
+
+  function tryPlaceObstacleRow(r, tileId) {
+    if (r <= 5 || r >= ROWS - 5) return false;
+    if (r - lastObstacleRow < MIN_OBSTACLE_SPACING_ROWS) return false;
+    for (let x = 0; x < W; x++) {
+      if (grid[r][x] === TILE_SPEED || grid[r][x] === TILE_JUMP || grid[r][x] === TILE_WARP) return false;
+    }
+    const [ts, te] = trackBounds(r);
+    const avail = [];
+    for (let x = ts; x <= te; x++) if (grid[r][x] === TILE_FLOOR || grid[r][x] === TILE_RAMP) avail.push(x);
+    if (avail.length < 4) return false;
+
+    const count = (rng() < 0.5) ? 1 : 2;
+    let placed = null;
+
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const pool = avail.slice();
+      const chosen = [];
+      for (let i = 0; i < count; i++) {
+        const idx = Math.floor(rng() * pool.length);
+        chosen.push(pool.splice(idx, 1)[0]);
+      }
+      const occ = new Set(chosen);
+      let hasAdj = false;
+      for (let x = ts; x < te; x++) {
+        if (!occ.has(x) && !occ.has(x + 1)) { hasAdj = true; break; }
+      }
+      if (hasAdj) { placed = chosen; break; }
+    }
+    if (!placed) return false;
+    for (const x of placed) grid[r][x] = tileId;
+    lastObstacleRow = r;
+    return true;
+  }
+
+  // Phase 2: boulders
+  for (let r = 85; r < 145; r += 11 + Math.floor(rng() * 6)) {
+    tryPlaceObstacleRow(r, TILE_BOULDER);
+  }
+  // Phase 3: mines
+  for (let r = 160; r < 225; r += 11 + Math.floor(rng() * 6)) {
+    tryPlaceObstacleRow(r, TILE_MINE);
+  }
+
+  // Bonus cubes
+  const bonusMeta = [];
+  function placeBonus(r, tileId, x) {
+    if (r <= 3 || r >= ROWS - 3) return false;
+    if (x < 0 || x >= W) return false;
+    if (grid[r][x] !== TILE_FLOOR && grid[r][x] !== TILE_RAMP) return false;
+    for (let xx = 0; xx < W; xx++) {
+      if (grid[r][xx] === TILE_BOULDER || grid[r][xx] === TILE_MINE) return false;
+    }
+    grid[r][x] = tileId;
+    bonusMeta.push({ row: r, col: x, id: tileId });
+    return true;
+  }
+
+  // Intro speed boosters
+  placeBonus(15, TILE_SPEED, 6);
+  placeBonus(40, TILE_SPEED, 4);
+  placeBonus(62, TILE_SPEED, 8);
+
+  // Phase 3 speed boosters (alley)
+  placeBonus(170, TILE_SPEED, 2);
+  placeBonus(195, TILE_SPEED, 10);
+  placeBonus(218, TILE_SPEED, 6);
+
+  // Phase 4 warp teleporters before the abyss
+  placeBonus(248, TILE_WARP, 6);
+  placeBonus(254, TILE_WARP, 6);
+
+  // Phase 5 jump boosters (steep sprint)
+  placeBonus(300, TILE_JUMP, 6);
+  placeBonus(320, TILE_JUMP, 4);
+  placeBonus(342, TILE_JUMP, 8);
+
+  return {
+    name: "Neon Canyon Descent",
+    width: W,
+    total_rows: ROWS,
+    slope_profile,
+    slope_deltas: slopeDeltas,
+    surface_y: surfaceY,
+    grid,
+    bonus_meta: bonusMeta
+  };
+}
+
+const LEVEL_CONFIG = generateLevelData();
+
+/* ============================================================
+   RENDERER / SCENE / CAMERA / LIGHTS
+   ============================================================ */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x2a0a3e);
+scene.fog = new THREE.Fog(0x3a1a4a, 25, 95);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 400);
+camera.position.set(6, 5, -5);
+
+// Sunset directional light (shadow map 1024x1024, tight frustum)
+const sun = new THREE.DirectionalLight(0xffaa66, 1.35);
+sun.position.set(-18, 40, -8);
+sun.castShadow = true;
+sun.shadow.mapSize.width = 1024;
+sun.shadow.mapSize.height = 1024;
+sun.shadow.camera.near = 5;
+sun.shadow.camera.far = 90;
+sun.shadow.camera.left = -14;
+sun.shadow.camera.right = 14;
+sun.shadow.camera.top = 14;
+sun.shadow.camera.bottom = -14;
+sun.shadow.bias = -0.0006;
+scene.add(sun);
+scene.add(sun.target);
+
+scene.add(new THREE.AmbientLight(0x8866aa, 0.55));
+scene.add(new THREE.HemisphereLight(0xff88cc, 0x3a2018, 0.45));
+
+/* ============================================================
+   VOXEL GEOMETRY — InstancedMesh chunks with active Z window
+   ============================================================ */
+const boxGeo = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+
+// Matte canyon materials (NO neon on obstacles)
+const floorMat    = new THREE.MeshLambertMaterial({ color: COLOR_CANYON_SAND });
+const rampMat     = new THREE.MeshLambertMaterial({ color: 0xc4632b });
+const wallMat     = new THREE.MeshLambertMaterial({ color: COLOR_CANYON_ROCK });
+const boulderMat  = new THREE.MeshLambertMaterial({ color: COLOR_CANYON_ROCK });
+const mineMat     = new THREE.MeshLambertMaterial({ color: 0x221111 });
+
+// Emissive neon materials (only for guardrails + bonus cubes + gates)
+const railMat  = new THREE.MeshBasicMaterial({ color: COLOR_NEON_CYAN });
+const gateMat  = new THREE.MeshBasicMaterial({ color: COLOR_NEON_AMBER });
+
+const chunks = [];
+
+function addInstanced(group, list, mat, castShadow) {
+  if (list.length === 0) return null;
+  const mesh = new THREE.InstancedMesh(boxGeo, mat, list.length);
+  mesh.castShadow = castShadow;
+  mesh.receiveShadow = true;
+  const m = new THREE.Matrix4();
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i];
+    m.makeTranslation(p.x, p.y, p.z);
+    mesh.setMatrixAt(i, m);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  group.add(mesh);
+  return mesh;
+}
+
+function buildChunk(startRow, endRow) {
+  const group = new THREE.Group();
+  group.userData.startRow = startRow;
+  group.userData.endRow = endRow;
+
+  const floorList = [], rampList = [], wallList = [], railList = [],
+        boulderList = [], mineList = [], gateList = [];
+
+  const W = LEVEL_CONFIG.width;
+  const grid = LEVEL_CONFIG.grid;
+  const surfaceY = LEVEL_CONFIG.surface_y;
+
+  for (let r = startRow; r < endRow; r++) {
+    const sy = surfaceY[r];
+    const z = r + 0.5;
+    const phase2 = (r >= 70 && r < 150);
+    const ts = phase2 ? 3 : 0;
+    const te = phase2 ? 8 : W - 1;
+    const pitGap = (r >= 258 && r <= 268);
+
+    // Canyon walls: outer columns + phase-2 flanking walls
+    const wallCols = new Set();
+    wallCols.add(ts - 1); wallCols.add(te + 1);
+    if (phase2) { for (const wx of [-2, -1, 0, 1, 2, 9, 10, 11, 12, 13]) wallCols.add(wx); }
+    else { for (const wx of [-2, -1, W, W + 1]) wallCols.add(wx); }
+
+    for (const wx of wallCols) {
+      if (wx < -3 || wx > W + 2) continue;
+      const wallH = 3 + ((wx * 7 + r * 3) % 3);
+      for (let wy = 0; wy < wallH; wy++) {
+        wallList.push({ x: wx, y: sy + wy - 0.5, z });
+      }
+    }
+
+    // Neon guardrails at track edges
+    if (!pitGap) {
+      const lTile = grid[r][ts];
+      const rTile = grid[r][te];
+      if (lTile !== TILE_PIT && lTile !== TILE_START && lTile !== TILE_FINISH) {
+        railList.push({ x: ts, y: sy + 0.35, z });
+      }
+      if (rTile !== TILE_PIT && rTile !== TILE_START && rTile !== TILE_FINISH) {
+        railList.push({ x: te, y: sy + 0.35, z });
+      }
+    }
+
+    // Ground tiles + obstacles + gates
+    for (let x = 0; x < W; x++) {
+      const t = grid[r][x];
+      if (t === TILE_PIT) continue;
+      if (t === TILE_FLOOR) floorList.push({ x, y: sy - 0.5, z });
+      else if (t === TILE_RAMP) rampList.push({ x, y: sy - 0.5, z });
+      else if (t === TILE_BOULDER) boulderList.push({ x, y: sy - 0.5, z });
+      else if (t === TILE_MINE) mineList.push({ x, y: sy - 0.5, z });
+      else if (t === TILE_START || t === TILE_FINISH) {
+        gateList.push({ x, y: sy - 0.5, z });
+        gateList.push({ x, y: sy + 0.5, z });
+        gateList.push({ x, y: sy + 1.5, z });
+      }
+      // TILE_SPEED/JUMP/WARP handled by global bonus instanced meshes
+    }
+  }
+
+  addInstanced(group, floorList,   floorMat,   true);
+  addInstanced(group, rampList,    rampMat,    true);
+  addInstanced(group, wallList,    wallMat,    false); // decorative walls don't cast shadow
+  addInstanced(group, railList,    railMat,    false);
+  addInstanced(group, boulderList, boulderMat, true);
+  addInstanced(group, mineList,    mineMat,    true);
+  addInstanced(group, gateList,    gateMat,    false);
+
+  return group;
+}
+
+for (let s = 0; s < LEVEL_CONFIG.total_rows; s += CHUNK_ROWS) {
+  const e = Math.min(s + CHUNK_ROWS, LEVEL_CONFIG.total_rows);
+  const chunk = buildChunk(s, e);
+  scene.add(chunk);
+  chunks.push(chunk);
+}
+
+/* ============================================================
+   BONUS CUBES — InstancedMesh per type, dynamic rotation + bob
+   ============================================================ */
+const bonusByType = { 5: [], 6: [], 7: [] };
+for (const b of LEVEL_CONFIG.bonus_meta) {
+  bonusByType[b.id].push({
+    row: b.row, col: b.col,
+    x: b.col,
+    y0: LEVEL_CONFIG.surface_y[b.row] + 1.05,
+    z: b.row + 0.5,
+    key: b.row + ',' + b.col
+  });
+}
+
+const bonusMesh = {};
+const bonusMats = {
+  5: new THREE.MeshStandardMaterial({ color: COLOR_NEON_CYAN,    emissive: COLOR_NEON_CYAN,    emissiveIntensity: 2.2, roughness: 0.35, metalness: 0.1 }),
+  6: new THREE.MeshStandardMaterial({ color: COLOR_NEON_LIME,    emissive: COLOR_NEON_LIME,    emissiveIntensity: 2.2, roughness: 0.35, metalness: 0.1 }),
+  7: new THREE.MeshStandardMaterial({ color: COLOR_NEON_MAGENTA, emissive: COLOR_NEON_MAGENTA, emissiveIntensity: 2.2, roughness: 0.35, metalness: 0.1 })
+};
+
+for (const t of [5, 6, 7]) {
+  const list = bonusByType[t];
+  if (list.length === 0) continue;
+  const mesh = new THREE.InstancedMesh(boxGeo, bonusMats[t], list.length);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.frustumCulled = false;
+  const m = new THREE.Matrix4();
+  for (let i = 0; i < list.length; i++) {
+    m.makeTranslation(list[i].x, list[i].y0, list[i].z);
+    mesh.setMatrixAt(i, m);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  scene.add(mesh);
+  bonusMesh[t] = mesh;
+}
+
+// Point lights for visual pop (only a small handful)
+const bonusLights = [];
+{
+  const lightTargets = [bonusByType[5][0], bonusByType[6][0], bonusByType[7][0]].filter(Boolean);
+  for (const b of lightTargets) {
+    const light = new THREE.PointLight(
+      b === bonusByType[5][0] ? COLOR_NEON_CYAN :
+      b === bonusByType[6][0] ? COLOR_NEON_LIME : COLOR_NEON_MAGENTA,
+      1.0, 6, 2
+    );
+    light.position.set(b.x, b.y0, b.z);
+    scene.add(light);
+    bonusLights.push({ light, ref: b });
+  }
+}
+
+/* ============================================================
+   AVATAR — cubic voxel slider with glowing visor
+   ============================================================ */
+const avatar = new THREE.Group();
+avatar.position.set(6, LEVEL_CONFIG.surface_y[1] + 0.25, 1.5);
+
+const bodyMat = new THREE.MeshStandardMaterial({
+  color: COLOR_AVATAR, emissive: 0x005055, emissiveIntensity: 0.6, roughness: 0.4, metalness: 0.2
+});
+const body = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.55, 0.9), bodyMat);
+body.position.y = 0.05;
+body.castShadow = true;
+avatar.add(body);
+
+const runnerMat = new THREE.MeshStandardMaterial({ color: 0x101018, roughness: 0.7 });
+const runner = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.14, 0.95), runnerMat);
+runner.position.y = -0.28;
+runner.castShadow = true;
+avatar.add(runner);
+
+const visorMat = new THREE.MeshBasicMaterial({ color: 0xff2fd6 });
+const visor = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.16, 0.08), visorMat);
+visor.position.set(0, 0.14, 0.46);
+avatar.add(visor);
+
+const finMat = new THREE.MeshStandardMaterial({ color: 0x00f3ff, emissive: 0x00f3ff, emissiveIntensity: 1.4 });
+const fin = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.22, 0.5), finMat);
+fin.position.set(0, 0.42, -0.1);
+avatar.add(fin);
+
+scene.add(avatar);
+
+/* ============================================================
+   PARTICLE TRAIL — cubic instanced particles
+   ============================================================ */
+const MAX_PARTICLES = 220;
+const particleGeo = new THREE.BoxGeometry(0.16, 0.16, 0.16);
+const particleMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.9 });
+const particleMesh = new THREE.InstancedMesh(particleGeo, particleMat, MAX_PARTICLES);
+particleMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+particleMesh.frustumCulled = false;
+particleMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_PARTICLES * 3), 3);
+scene.add(particleMesh);
+
+const particles = [];
+{
+  const zeroM = new THREE.Matrix4().makeScale(0, 0, 0);
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    particles.push({
+      active: false, x: 0, y: 0, z: 0,
+      vx: 0, vy: 0, vz: 0, life: 0, maxLife: 0.6,
+      color: new THREE.Color(COLOR_NEON_CYAN)
+    });
+    particleMesh.setMatrixAt(i, zeroM);
+    particleMesh.setColorAt(i, new THREE.Color(COLOR_NEON_CYAN));
+  }
+  particleMesh.instanceMatrix.needsUpdate = true;
+  if (particleMesh.instanceColor) particleMesh.instanceColor.needsUpdate = true;
+}
+
+let particleEmitTimer = 0;
+function emitParticle() {
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    const p = particles[i];
+    if (p.active) continue;
+    p.active = true;
+    p.x = player.x + (Math.random() - 0.5) * 0.45;
+    p.y = player.y - 0.22 + Math.random() * 0.1;
+    p.z = player.z - 0.35;
+    p.vx = -player.vx * 0.35 + (Math.random() - 0.5) * 1.6;
+    p.vy = 0.6 + Math.random() * 1.6;
+    p.vz = -player.vz * 0.22 - 1.2;
+    p.life = 0;
+    p.maxLife = 0.6;
+    if (player.boostTimer > 0) p.color.setHex(COLOR_NEON_MAGENTA);
+    else if (!player.grounded)   p.color.setHex(COLOR_NEON_AMBER);
+    else                          p.color.setHex(COLOR_NEON_CYAN);
+    return;
+  }
+}
+
+function updateParticles(dt) {
+  const m = new THREE.Matrix4();
+  const sM = new THREE.Matrix4();
+  const zeroM = new THREE.Matrix4().makeScale(0, 0, 0);
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    const p = particles[i];
+    if (!p.active) { particleMesh.setMatrixAt(i, zeroM); continue; }
+    p.life += dt;
+    if (p.life >= p.maxLife) {
+      p.active = false;
+      particleMesh.setMatrixAt(i, zeroM);
+      continue;
+    }
+    p.vy -= 5.0 * dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.z += p.vz * dt;
+    const s = 1 - (p.life / p.maxLife);
+    m.makeTranslation(p.x, p.y, p.z);
+    sM.makeScale(s, s, s);
+    m.multiply(sM);
+    particleMesh.setMatrixAt(i, m);
+    particleMesh.setColorAt(i, p.color);
+  }
+  particleMesh.instanceMatrix.needsUpdate = true;
+  if (particleMesh.instanceColor) particleMesh.instanceColor.needsUpdate = true;
+}
+
+function spawnBurst(x, y, z, colorHex, count, power) {
+  let placed = 0;
+  for (let i = 0; i < MAX_PARTICLES && placed < count; i++) {
+    const p = particles[i];
+    if (p.active) continue;
+    p.active = true;
+    p.x = x; p.y = y; p.z = z;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.random() * Math.PI;
+    const r = power * (0.5 + Math.random());
+    p.vx = Math.sin(phi) * Math.cos(theta) * r;
+    p.vy = Math.abs(Math.cos(phi)) * r * 1.2 + 1;
+    p.vz = Math.sin(phi) * Math.sin(theta) * r;
+    p.life = 0;
+    p.maxLife = 0.7 + Math.random() * 0.3;
+    p.color.setHex(colorHex);
+    placed++;
+  }
+}
+
+/* ============================================================
+   PROCEDURAL AUDIO — pure Web Audio synthesis
+   ============================================================ */
+let audioCtx = null;
+let glideFilter = null;
+let glideGain = null;
+let glideNoise = null;
+let audioReady = false;
+
+function initAudio() {
+  if (audioReady) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // Glide / wind loop — procedural white noise → bandpass
+    const sr = audioCtx.sampleRate;
+    const buf = audioCtx.createBuffer(1, sr * 2, sr);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+    glideNoise = audioCtx.createBufferSource();
+    glideNoise.buffer = buf;
+    glideNoise.loop = true;
+    glideFilter = audioCtx.createBiquadFilter();
+    glideFilter.type = 'bandpass';
+    glideFilter.frequency.value = 400;
+    glideFilter.Q.value = 1.1;
+    glideGain = audioCtx.createGain();
+    glideGain.gain.value = 0.14;
+    glideNoise.connect(glideFilter).connect(glideGain).connect(audioCtx.destination);
+    glideNoise.start();
+    audioReady = true;
+  } catch (e) {
+    audioReady = false;
+  }
+}
+
+function updateGlide(speed) {
+  if (!audioReady || !glideFilter) return;
+  const t = audioCtx.currentTime;
+  const f = 400 + Math.min(1, speed / MAX_SLIDE_SPEED) * 1400;
+  glideFilter.frequency.setTargetAtTime(f, t, 0.06);
+}
+
+function playJump() {
+  if (!audioReady) return;
+  const t = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(200, t);
+  osc.frequency.exponentialRampToValueAtTime(650, t + 0.12);
+  g.gain.setValueAtTime(0.28, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+  osc.connect(g).connect(audioCtx.destination);
+  osc.start(t); osc.stop(t + 0.16);
+}
+
+function playBoost() {
+  if (!audioReady) return;
+  const t = audioCtx.currentTime;
+  const o1 = audioCtx.createOscillator();
+  const o2 = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o1.type = 'triangle'; o1.frequency.value = 440;
+  o2.type = 'triangle'; o2.frequency.value = 880;
+  g.gain.setValueAtTime(0.22, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.26);
+  o1.connect(g); o2.connect(g);
+  g.connect(audioCtx.destination);
+  o1.start(t); o2.start(t);
+  o1.stop(t + 0.27); o2.stop(t + 0.27);
+}
+
+function playWarp() {
+  if (!audioReady) return;
+  const t = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(800, t);
+  osc.frequency.exponentialRampToValueAtTime(200, t + 0.42);
+  const lfo = audioCtx.createOscillator();
+  const lfoG = audioCtx.createGain();
+  lfo.frequency.value = 32;
+  lfoG.gain.value = 70;
+  lfo.connect(lfoG).connect(osc.frequency);
+  lfo.start(t);
+  g.gain.setValueAtTime(0.24, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.46);
+  osc.connect(g).connect(audioCtx.destination);
+  osc.start(t); osc.stop(t + 0.5);
+  lfo.stop(t + 0.5);
+}
+
+function playExplosion() {
+  if (!audioReady) return;
+  const t = audioCtx.currentTime;
+  const sr = audioCtx.sampleRate;
+  const buf = audioCtx.createBuffer(1, sr * 1.0, sr);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(900, t);
+  filter.frequency.exponentialRampToValueAtTime(80, t + 0.4);
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.5, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+  src.connect(filter).connect(g).connect(audioCtx.destination);
+  src.start(t); src.stop(t + 0.5);
+}
+
+function playVictory() {
+  if (!audioReady) return;
+  const t = audioCtx.currentTime;
+  const notes = [523.25, 659.25, 783.99, 1046.50]; // C5 E5 G5 C6
+  notes.forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 1600;
+    osc.type = 'square';
+    osc.frequency.value = freq;
+    const st = t + i * 0.15;
+    g.gain.setValueAtTime(0.0001, st);
+    g.gain.exponentialRampToValueAtTime(0.19, st + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.001, st + 0.22);
+    osc.connect(filter).connect(g).connect(audioCtx.destination);
+    osc.start(st); osc.stop(st + 0.26);
+  });
+}
+
+/* ============================================================
+   PLAYER STATE
+   ============================================================ */
+const player = {
+  x: 6, y: LEVEL_CONFIG.surface_y[1] + 0.25, z: 1.5,
+  vx: 0, vy: 0, vz: BASE_SLIDE_SPEED,
+  grounded: true,
+  boostTimer: 0,
+  state: 'READY', // READY | SLIDING | CRASHED | CLEARED
+  elapsed: 0,
+  bank: 0
+};
+
+const collected = new Set();
+const keys = { left: false, right: false, jump: false };
+let touchLeft = false, touchRight = false;
+
+/* ============================================================
+   CONTROLS — strict 3 arrow keys + 2-zone touch
+   ============================================================ */
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'ArrowLeft')  { keys.left = true;  e.preventDefault(); return; }
+  if (e.code === 'ArrowRight') { keys.right = true; e.preventDefault(); return; }
+  if (e.code === 'ArrowUp') {
+    e.preventDefault();
+    if (player.state === 'CRASHED' || player.state === 'CLEARED') { restartRun(); return; }
+    if (player.state === 'READY') { beginRun(); return; }
+    keys.jump = true;
+    return;
+  }
+  // Strict rule: no other keys are bound.
+});
+
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'ArrowLeft')  { keys.left = false; return; }
+  if (e.code === 'ArrowRight') { keys.right = false; return; }
+  if (e.code === 'ArrowUp')    { keys.jump = false; return; }
+});
+
+let touchStartY = 0;
+
+function refreshTouches(touches) {
+  touchLeft = false; touchRight = false;
+  const half = window.innerWidth / 2;
+  for (const t of touches) {
+    if (t.clientX < half) touchLeft = true;
+    else touchRight = true;
+  }
+}
+
+window.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (player.state === 'CRASHED' || player.state === 'CLEARED') { restartRun(); return; }
+  if (player.state === 'READY') { beginRun(); return; }
+  if (e.touches.length >= 2) keys.jump = true;
+  else if (e.touches.length === 1) touchStartY = e.touches[0].clientY;
+  refreshTouches(e.touches);
+}, { passive: false });
+
+window.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (e.touches.length === 1) {
+    const dy = e.touches[0].clientY - touchStartY;
+    if (dy < -28) keys.jump = true;
+  }
+  refreshTouches(e.touches);
+}, { passive: false });
+
+window.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  if (e.touches.length === 0) { touchLeft = false; touchRight = false; keys.jump = false; }
+  else { refreshTouches(e.touches); }
+}, { passive: false });
+
+window.addEventListener('touchcancel', (e) => {
+  touchLeft = false; touchRight = false; keys.jump = false;
+}, { passive: false });
+
+/* ============================================================
+   HUD / MESSAGES
+   ============================================================ */
+const timerEl = document.getElementById('timer');
+const msgEl = document.getElementById('msg');
+
+function formatTime(s) {
+  const mm = Math.floor(s / 60);
+  const ss = Math.floor(s % 60);
+  const hh = Math.floor((s * 100) % 100);
+  return `${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}.${String(hh).padStart(2,'0')}`;
+}
+function updateHUD() { timerEl.textContent = formatTime(player.elapsed); }
+function showMessage(main, sub) {
+  msgEl.innerHTML = main + '<span class="sub">' + sub + '</span>';
+  msgEl.classList.add('show');
+}
+function hideMessage() { msgEl.classList.remove('show'); }
+
+/* ============================================================
+   GAME LIFECYCLE
+   ============================================================ */
+function beginRun() {
+  initAudio();
+  player.state = 'SLIDING';
+  hideMessage();
+}
+
+function restartRun() {
+  player.x = 6;
+  player.y = LEVEL_CONFIG.surface_y[1] + 0.25;
+  player.z = 1.5;
+  player.vx = 0; player.vy = 0; player.vz = BASE_SLIDE_SPEED;
+  player.grounded = true;
+  player.boostTimer = 0;
+  player.elapsed = 0;
+  player.bank = 0;
+  player.state = 'SLIDING';
+  collected.clear();
+  for (const p of particles) p.active = false;
+  keys.jump = false; keys.left = false; keys.right = false;
+  hideMessage();
+}
+
+function triggerCrash() {
+  if (player.state !== 'SLIDING') return;
+  player.state = 'CRASHED';
+  playExplosion();
+  spawnBurst(player.x, player.y + 0.2, player.z, 0xff5a1a, 90, 8.0);
+  spawnBurst(player.x, player.y + 0.2, player.z, 0x221111, 40, 5.0);
+  showMessage('CRASHED', 'Press ↑ or tap to restart');
+}
+
+function triggerWin() {
+  if (player.state !== 'SLIDING') return;
+  player.state = 'CLEARED';
+  playVictory();
+  showMessage('FINISH!', `Time ${formatTime(player.elapsed)} — Press ↑ or tap to restart`);
+}
+
+/* ============================================================
+   BOOST EFFECTS
+   ============================================================ */
+function activateSpeedBoost() {
+  player.boostTimer = BOOST_DURATION;
+  playBoost();
+  spawnBurst(player.x, player.y + 0.3, player.z, COLOR_NEON_CYAN, 26, 4.0);
+}
+function activateJumpBoost() {
+  player.vy = SUPER_JUMP_FORCE;
+  player.grounded = false;
+  playBoost();
+  spawnBurst(player.x, player.y + 0.2, player.z, COLOR_NEON_LIME, 30, 4.5);
+}
+function activateWarp() {
+  // Bounded proximity leap: never exceed WARP_FORWARD_DISTANCE
+  const dz = Math.min(WARP_FORWARD_DISTANCE, WARP_FORWARD_DISTANCE);
+  player.z += dz;
+  player.y += WARP_ALTITUDE_BOOST;
+  player.grounded = false;
+  playWarp();
+  spawnBurst(player.x, player.y, player.z, COLOR_NEON_MAGENTA, 46, 5.5);
+}
+
+/* ============================================================
+   PHYSICS
+   ============================================================ */
+function currentRow() { return Math.floor(player.z); }
+function trackBoundsAt(r) { return (r >= 70 && r < 150) ? [3, 8] : [0, LEVEL_CONFIG.width - 1]; }
+
+function updatePhysics(dt) {
+  // Boost timer
+  if (player.boostTimer > 0) {
+    player.boostTimer -= dt;
+    if (player.boostTimer < 0) player.boostTimer = 0;
+  }
+
+  // Lateral steering
+  let steer = 0;
+  if (keys.left  || touchLeft)  steer -= 1;
+  if (keys.right || touchRight) steer += 1;
+
+  player.vx += steer * STEER_SPEED * dt;
+  const damp = Math.pow(STEER_DAMPING, dt * 60);
+  player.vx *= damp;
+  const MAX_VX = 9.0;
+  if (player.vx >  MAX_VX) player.vx =  MAX_VX;
+  if (player.vx < -MAX_VX) player.vx = -MAX_VX;
+
+  // Forward velocity from slope + boost (strictly clamped)
+  const r = Math.max(0, Math.min(LEVEL_CONFIG.total_rows - 1, currentRow()));
+  const slopeDown = Math.max(0, -LEVEL_CONFIG.slope_deltas[r]); // 0.15..0.35
+  let targetSpeed = BASE_SLIDE_SPEED + slopeDown * 20;
+  if (player.boostTimer > 0) targetSpeed *= BOOST_MULTIPLIER;
+  if (targetSpeed > MAX_SLIDE_SPEED) targetSpeed = MAX_SLIDE_SPEED;
+  if (targetSpeed < 1.0) targetSpeed = 1.0;
+
+  const accel = 14;
+  if (player.vz < targetSpeed) {
+    player.vz += accel * dt;
+    if (player.vz > targetSpeed) player.vz = targetSpeed;
+  } else {
+    player.vz -= accel * dt;
+    if (player.vz < targetSpeed) player.vz = targetSpeed;
+  }
+  if (player.vz > MAX_SLIDE_SPEED) player.vz = MAX_SLIDE_SPEED;
+
+  // Jump
+  if (keys.jump && player.grounded) {
+    player.vy = JUMP_FORCE;
+    player.grounded = false;
+    keys.jump = false;
+    playJump();
+  }
+
+  // Gravity
+  if (!player.grounded) {
+    player.vy -= GRAVITY * dt;
+  }
+
+  // Integrate
+  player.x += player.vx * dt;
+  player.z += player.vz * dt;
+  player.y += player.vy * dt;
+
+  // Clamp lateral to track bounds (walls act as barriers)
+  const [ts, te] = trackBoundsAt(r);
+  if (player.x < ts) { player.x = ts; player.vx = 0; }
+  if (player.x > te) { player.x = te; player.vx = 0; }
+
+  // Ground contact
+  const col = Math.round(player.x);
+  let onFloor = false;
+  if (r >= 0 && r < LEVEL_CONFIG.total_rows && col >= 0 && col < LEVEL_CONFIG.width) {
+    const t = LEVEL_CONFIG.grid[r][col];
+    if (t === TILE_FLOOR || t === TILE_RAMP) onFloor = true;
+  }
+  if (onFloor) {
+    const groundY = LEVEL_CONFIG.surface_y[r] + 0.28;
+    if (!player.grounded) {
+      if (player.y <= groundY) {
+        player.y = groundY;
+        player.vy = 0;
+        player.grounded = true;
+      }
+    } else {
+      // Smooth step interpolation along the descending ground
+      const lerp = Math.min(1, dt * 30);
+      player.y += (groundY - player.y) * lerp;
+      if (Math.abs(player.y - groundY) < 0.01) player.y = groundY;
+      player.vy = 0;
+    }
+  } else {
+    player.grounded = false;
+  }
+
+  // Fail check: relative to local track elevation
+  const localTrackY = LEVEL_CONFIG.surface_y[r] || LEVEL_CONFIG.surface_y[LEVEL_CONFIG.total_rows - 1];
+  if (player.y < localTrackY - 12.0) {
+    triggerCrash();
+  }
+
+  // Finish check
+  if (player.z >= LEVEL_CONFIG.total_rows - 1.5) {
+    triggerWin();
+  }
+}
+
+/* ============================================================
+   COLLISIONS & PICKUPS
+   ============================================================ */
+function checkCollisions() {
+  const r0 = Math.max(0, Math.floor(player.z - 1));
+  const r1 = Math.min(LEVEL_CONFIG.total_rows - 1, Math.floor(player.z + 1));
+  const col = Math.round(player.x);
+  if (col < 0 || col >= LEVEL_CONFIG.width) return;
+  for (let r = r0; r <= r1; r++) {
+    const t = LEVEL_CONFIG.grid[r][col];
+    if (t === TILE_BOULDER || t === TILE_MINE) {
+      const dz = (r + 0.5) - player.z;
+      if (Math.abs(dz) < 0.65) {
+        triggerCrash();
+        return;
+      }
+    }
+  }
+}
+
+function checkPickups() {
+  const r0 = Math.max(0, Math.floor(player.z - 1));
+  const r1 = Math.min(LEVEL_CONFIG.total_rows - 1, Math.floor(player.z + 1));
+  const col = Math.round(player.x);
+  if (col < 0 || col >= LEVEL_CONFIG.width) return;
+  for (let r = r0; r <= r1; r++) {
+    const key = r + ',' + col;
+    if (collected.has(key)) continue;
+    const t = LEVEL_CONFIG.grid[r][col];
+    const dz = (r + 0.5) - player.z;
+    if (Math.abs(dz) > 0.85) continue;
+    const dx = col - player.x;
+    if (Math.abs(dx) > 0.85) continue;
+    if (t === TILE_SPEED)      { activateSpeedBoost(); collected.add(key); }
+    else if (t === TILE_JUMP)  { activateJumpBoost();  collected.add(key); }
+    else if (t === TILE_WARP)  { activateWarp();       collected.add(key); }
+  }
+}
+
+/* ============================================================
+   BONUS CUBE ANIMATION (float + rotate, active-window culled)
+   ============================================================ */
+const _m = new THREE.Matrix4();
+const _q = new THREE.Quaternion();
+const _e = new THREE.Euler();
+const _v = new THREE.Vector3();
+const _s = new THREE.Vector3(0.85, 0.85, 0.85);
+const _hidden = new THREE.Matrix4().makeTranslation(0, -1000, 0);
+
+function updateBonusCubes(t, avZ) {
+  const minZ = avZ - ACTIVE_WINDOW_BACK;
+  const maxZ = avZ + ACTIVE_WINDOW_FRONT;
+  for (const type of [5, 6, 7]) {
+    const mesh = bonusMesh[type];
+    if (!mesh) continue;
+    const list = bonusByType[type];
+    for (let i = 0; i < list.length; i++) {
+      const b = list[i];
+      if (collected.has(b.key) || b.z < minZ || b.z > maxZ) {
+        mesh.setMatrixAt(i, _hidden);
+        continue;
+      }
+      const bob = Math.sin(t * 2.8 + b.row * 0.4) * 0.16;
+      _e.set(t * 1.1, t * 1.6, 0);
+      _q.setFromEuler(_e);
+      _v.set(b.x, b.y0 + bob, b.z);
+      _m.compose(_v, _q, _s);
+      mesh.setMatrixAt(i, _m);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+  }
+  // Update representative point lights to follow player proximity
+  for (const bl of bonusLights) {
+    const b = bl.ref;
+    if (collected.has(b.key) || b.z < minZ || b.z > maxZ) {
+      bl.light.intensity = 0;
+    } else {
+      bl.light.intensity = 1.0;
+      bl.light.position.set(b.x, b.y0 + Math.sin(t * 2.8 + b.row * 0.4) * 0.16, b.z);
+    }
+  }
+}
+
+/* ============================================================
+   CHUNK VISIBILITY (active Z window)
+   ============================================================ */
+function updateChunkVisibility(avZ) {
+  const minZ = avZ - ACTIVE_WINDOW_BACK;
+  const maxZ = avZ + ACTIVE_WINDOW_FRONT;
+  for (const c of chunks) {
+    const cs = c.userData.startRow;
+    const ce = c.userData.endRow;
+    c.visible = (ce >= minZ && cs <= maxZ);
+  }
+}
+
+/* ============================================================
+   SUN SHADOW FOLLOW (tight 1024x1024 frustum)
+   ============================================================ */
+function updateSunShadow() {
+  sun.position.set(player.x - 18, player.y + 34, player.z - 10);
+  sun.target.position.set(player.x, player.y, player.z + 12);
+  sun.target.updateMatrixWorld();
+}
+
+/* ============================================================
+   CAMERA — slope-aware 45°–60° pitch
+   ============================================================ */
+function updateCamera() {
+  const r = Math.max(0, Math.min(LEVEL_CONFIG.total_rows - 1, currentRow()));
+  const slope = Math.max(0, -LEVEL_CONFIG.slope_deltas[r]);
+  const t = Math.max(0, Math.min(1, (slope - 0.15) / 0.20));
+  const pitchDeg = 45 + t * 15;             // 45°..60°
+  const pitchRad = pitchDeg * Math.PI / 180;
+
+  const horizontal = CAMERA_DISTANCE * Math.cos(pitchRad);
+  const height     = CAMERA_DISTANCE * Math.sin(pitchRad);
+
+  const tgtX = player.x;
+  const tgtY = player.y + height;
+  const tgtZ = player.z - horizontal;
+
+  camera.position.x += (tgtX - camera.position.x) * CAMERA_LERP;
+  camera.position.y += (tgtY - camera.position.y) * CAMERA_LERP;
+  camera.position.z += (tgtZ - camera.position.z) * CAMERA_LERP;
+
+  // Enforce strict proximity constraints
+  const hAbove = camera.position.y - player.y;
+  if (hAbove > 5.0) camera.position.y = player.y + 5.0;
+  const behind = player.z - camera.position.z;
+  if (behind > 6.5) camera.position.z = player.z - 6.5;
+
+  camera.lookAt(player.x, player.y + 0.35, player.z);
+}
+
+/* ============================================================
+   MAIN LOOP
+   ============================================================ */
+let lastT = 0;
+function animate(now) {
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, Math.max(0, (now - lastT) / 1000 || 0));
+  lastT = now;
+  const t = now / 1000;
+
+  if (player.state === 'SLIDING') {
+    player.elapsed += dt;
+    updatePhysics(dt);
+    checkCollisions();
+    checkPickups();
+    updateGlide(player.vz);
+
+    particleEmitTimer += dt;
+    if (particleEmitTimer >= 0.028) {
+      particleEmitTimer = 0;
+      emitParticle();
+    }
+  } else if (player.state === 'READY') {
+    // gentle idle bob
+  }
+
+  updateParticles(dt);
+  updateCamera();
+  updateBonusCubes(t, player.z);
+  updateChunkVisibility(player.z);
+  updateSunShadow();
+  updateHUD();
+
+  // Avatar visual banking
+  const targetBank = -player.vx * 0.05;
+  player.bank += (targetBank - player.bank) * Math.min(1, dt * 10);
+  avatar.rotation.z = player.bank;
+  avatar.rotation.x = player.grounded ? 0 : -player.vy * 0.03;
+  avatar.position.set(player.x, player.y, player.z);
+
+  renderer.render(scene, camera);
+}
+
+/* ============================================================
+   RESIZE
+   ============================================================ */
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+avatar.position.set(player.x, player.y, player.z);
+updateChunkVisibility(player.z);
+updateCamera();
+showMessage('VOXY TRIP', 'Press ↑ or tap to slide');
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
