@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Voxy Trip</title>
+<style>
+  body { margin:0; overflow:hidden; background: linear-gradient(#0b001a, #2a0a3a, #d97736); font-family: monospace; }
+  canvas { display:block; }
+  #hud { position:absolute; top:10px; left:10px; color:#ffaa00; font-size:24px; text-shadow:0 0 10px #ffaa00; z-index:10; }
+  #overlay { position:absolute; top:0; left:0; width:100%; height:100%; display:flex; flex-direction:column; justify-content:center; align-items:center; background:rgba(0,0,0,0.6); color:#00f3ff; font-size:32px; text-shadow:0 0 20px #00f3ff; z-index:20; text-align:center; }
+  #overlay.hidden { display:none; }
+  #overlay small { font-size:18px; color:#ffaa00; margin-top:20px; }
+</style>
+</head>
+<body>
+<div id="hud">00:00.00</div>
+<div id="overlay">
+  <div>VOXY TRIP</div>
+  <small>Press ArrowUp or Tap to Start</small>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ============================================================
+// HIGHVIBE SPECIFICATION v0.2.2 -- voxy-trip
+// ============================================================
+
+// ---------- GLOBALS ----------
+const VOXEL_SIZE = 1.0;
+const GRAVITY = 16.0;
+const BASE_SLIDE_SPEED = 7.0;
+const MAX_SLIDE_SPEED = 14.0;
+const JUMP_FORCE = 6.5;
+const SUPER_JUMP_FORCE = 12.0;
+const BOOST_MULTIPLIER = 1.35;
+const BOOST_DURATION = 2.0;
+const WARP_FORWARD_DISTANCE = 10.0;
+const WARP_ALTITUDE_BOOST = 3.5;
+const STEER_SPEED = 13.0;
+const STEER_DAMPING = 0.86;
+const CAMERA_DISTANCE = 5.5;
+const CAMERA_HEIGHT = 4.2;
+const CAMERA_LERP = 0.1;
+
+const COLOR_CANYON_SAND = 0xd97736;
+const COLOR_CANYON_ROCK = 0x8b3a1a;
+const COLOR_NEON_CYAN = 0x00f3ff;
+const COLOR_NEON_LIME = 0x39ff14;
+const COLOR_NEON_MAGENTA = 0xff007f;
+const COLOR_NEON_AMBER = 0xffaa00;
+const COLOR_AVATAR = 0x00ffff;
+
+const TRACK_WIDTH = 12;
+const W = 12;
+
+const MIN_OBSTACLE_SPACING_ROWS = 10;
+const ACTIVE_WINDOW_BACK = 15.0;
+const ACTIVE_WINDOW_FRONT = 85.0;
+
+// ---------- LEVEL CONFIG (PORTABLE, DECLARATIVE) ----------
+function createLevelConfig() {
+  const totalRows = 360;
+  const width = W;
+  const grid = [];
+  for (let r = 0; r < totalRows; r++) {
+    const row = new Array(width).fill(1);
+    grid.push(row);
+  }
+
+  // Phase 1: Initiation Slope (rows 0-69)
+  grid[0][5] = 8;
+  grid[0][6] = 8;
+  grid[30][5] = 5;
+
+  // Phase 2: Narrow Canyon Chasm (rows 70-149)
+  for (let r = 70; r < 150; r++) {
+    for (let c = 0; c < width; c++) {
+      if (c < 3 || c > 8) grid[r][c] = 0;
+    }
+  }
+  const p2Obstacles = [
+    { r: 80, cols: [3, 8] },
+    { r: 95, cols: [4, 7] },
+    { r: 110, cols: [3, 6] },
+    { r: 125, cols: [5, 8] },
+    { r: 140, cols: [4, 6] },
+  ];
+  p2Obstacles.forEach(o => o.cols.forEach(c => grid[o.r][c] = 3));
+
+  // Phase 3: Minefield Alley (rows 150-229)
+  const p3Mines = [
+    { r: 160, cols: [2, 9] },
+    { r: 175, cols: [1, 10] },
+    { r: 190, cols: [3, 8] },
+    { r: 205, cols: [0, 11] },
+    { r: 220, cols: [4, 7] },
+  ];
+  p3Mines.forEach(o => o.cols.forEach(c => grid[o.r][c] = 4));
+  [155, 170, 185, 200, 215].forEach(r => { grid[r][5] = 5; });
+
+  // Phase 4: The Great Abyss Leap (rows 230-289)
+  grid[248][5] = 7;
+  for (let r = 250; r <= 257; r++) {
+    for (let c = 0; c < width; c++) grid[r][c] = 0;
+  }
+
+  // Phase 5: Final Downhill Sprint (rows 290-359)
+  [300, 315, 330, 345].forEach(r => { grid[r][5] = 6; });
+  const p5Obstacles = [
+    { r: 310, cols: [2, 9] },
+    { r: 325, cols: [1, 10] },
+    { r: 340, cols: [3, 8] },
+    { r: 355, cols: [0, 11] },
+  ];
+  p5Obstacles.forEach(o => o.cols.forEach(c => grid[o.r][c] = 4));
+  grid[359][5] = 9;
+  grid[359][6] = 9;
+
+  const slope_profile = [
+    { rows: 70, slope: 0.2 },
+    { rows: 80, slope: 0.4 },
+    { rows: 80, slope: 0.6 },
+    { rows: 60, slope: 0.8 },
+    { rows: 70, slope: 1.0 },
+  ];
+
+  return {
+    name: "Neon Canyon Descent",
+    width: width,
+    total_rows: totalRows,
+    slope_profile: slope_profile,
+    grid: grid
+  };
+}
+
+const LEVEL_CONFIG = createLevelConfig();
+
+function computeGroundYArray() {
+  const arr = new Array(LEVEL_CONFIG.total_rows);
+  let y = 0;
+  let rowIdx = 0;
+  LEVEL_CONFIG.slope_profile.forEach(sec => {
+    for (let i = 0; i < sec.rows; i++) {
+      arr[rowIdx] = y;
+      y -= sec.slope;
+      rowIdx++;
+    }
+  });
+  while (rowIdx < LEVEL_CONFIG.total_rows) {
+    arr[rowIdx] = y;
+    y -= 0.2;
+    rowIdx++;
+  }
+  return arr;
+}
+const GROUND_Y = computeGroundYArray();
+
+function getGroundY(row) {
+  if (row < 0) return 0;
+  if (row >= GROUND_Y.length) return GROUND_Y[GROUND_Y.length - 1];
+  return GROUND_Y[row];
+}
+
+function getSlopeAtRow(row) {
+  if (row < 0) return 0.2;
+  let acc = 0;
+  for (let sec of LEVEL_CONFIG.slope_profile) {
+    if (row < acc + sec.rows) return sec.slope;
+    acc += sec.rows;
+  }
+  return 1.0;
+}
+
+// ---------- THREE.JS SETUP ----------
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x2a0a3a, 20, 120);
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 200);
+camera.position.set(0, 5, -6);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const ambient = new THREE.AmbientLight(0x404060, 0.6);
+scene.add(ambient);
+
+const sunLight = new THREE.DirectionalLight(0xffaa88, 1.2);
+sunLight.position.set(10, 20, 10);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.width = 1024;
+sunLight.shadow.mapSize.height = 1024;
+sunLight.shadow.camera.near = 1;
+sunLight.shadow.camera.far = 60;
+sunLight.shadow.camera.left = -20;
+sunLight.shadow.camera.right = 20;
+sunLight.shadow.camera.top = 20;
+sunLight.shadow.camera.bottom = -20;
+scene.add(sunLight);
+scene.add(sunLight.target);
+
+// ---------- CHUNKED INSTANCED RENDERING ----------
+const CHUNK_SIZE = 30;
+const chunks = [];
+
+const floorMat = new THREE.MeshStandardMaterial({ color: 0x5a2e1a, roughness: 0.9 });
+const rockMat = new THREE.MeshStandardMaterial({ color: COLOR_CANYON_ROCK, roughness: 1.0, emissive: 0x000000 });
+const mineMat = new THREE.MeshStandardMaterial({ color: 0x221111, roughness: 1.0, emissive: 0x000000 });
+const speedMat = new THREE.MeshStandardMaterial({ color: COLOR_NEON_CYAN, emissive: COLOR_NEON_CYAN, emissiveIntensity: 1.0 });
+const jumpMat = new THREE.MeshStandardMaterial({ color: COLOR_NEON_LIME, emissive: COLOR_NEON_LIME, emissiveIntensity: 1.0 });
+const warpMat = new THREE.MeshStandardMaterial({ color: COLOR_NEON_MAGENTA, emissive: COLOR_NEON_MAGENTA, emissiveIntensity: 1.0 });
+const guardMat = new THREE.MeshStandardMaterial({ color: COLOR_NEON_CYAN, emissive: 0x000000, roughness: 0.5 });
+const wallMat = new THREE.MeshStandardMaterial({ color: COLOR_CANYON_SAND, roughness: 1.0 });
+
+const dummy = new THREE.Object3D();
+
+function createChunk(startRow, endRow) {
+  const group = new THREE.Group();
+  const floorInstances = [];
+  const rockInstances = [];
+  const mineInstances = [];
+  const speedInstances = [];
+  const jumpInstances = [];
+  const warpInstances = [];
+  const guardInstances = [];
+  const wallInstances = [];
+
+  for (let r = startRow; r < endRow && r < LEVEL_CONFIG.total_rows; r++) {
+    const groundY = getGroundY(r);
+    const row = LEVEL_CONFIG.grid[r];
+    for (let c = 0; c < LEVEL_CONFIG.width; c++) {
+      const tile = row[c];
+      const x = (c - W/2 + 0.5) * VOXEL_SIZE;
+      const z = r * VOXEL_SIZE;
+      const y = groundY;
+      if (tile === 0) continue;
+      if (tile === 1 || tile === 2 || tile === 8 || tile === 9) {
+        floorInstances.push({ x, y, z, tile });
+      } else if (tile === 3) {
+        rockInstances.push({ x, y: y + 0.5, z });
+      } else if (tile === 4) {
+        mineInstances.push({ x, y: y + 0.5, z });
+      } else if (tile === 5) {
+        speedInstances.push({ x, y: y + 0.8, z, r, c });
+      } else if (tile === 6) {
+        jumpInstances.push({ x, y: y + 0.8, z, r, c });
+      } else if (tile === 7) {
+        warpInstances.push({ x, y: y + 0.8, z, r, c });
+      }
+    }
+    if (row[0] !== 0 || row[LEVEL_CONFIG.width-1] !== 0) {
+      const gy = groundY;
+      guardInstances.push({ x: (-W/2 + 0.5) * VOXEL_SIZE, y: gy + 0.5, z: r * VOXEL_SIZE });
+      guardInstances.push({ x: (W/2 - 0.5) * VOXEL_SIZE, y: gy + 0.5, z: r * VOXEL_SIZE });
+    }
+    const wallHeight = 2 + Math.sin(r * 0.2) * 1.5;
+    for (let h = 0; h < wallHeight; h++) {
+      wallInstances.push({ x: (-W/2 - 0.5) * VOXEL_SIZE, y: groundY + h + 0.5, z: r * VOXEL_SIZE });
+      wallInstances.push({ x: (W/2 + 0.5) * VOXEL_SIZE, y: groundY + h + 0.5, z: r * VOXEL_SIZE });
+    }
+  }
+
+  function makeInstanced(geo, mat, instances, castShadow = true) {
+    if (instances.length === 0) return null;
+    const mesh = new THREE.InstancedMesh(geo, mat, instances.length);
+    mesh.frustumCulled = false;
+    mesh.castShadow = castShadow;
+    mesh.receiveShadow = true;
+    instances.forEach((inst, i) => {
+      dummy.position.set(inst.x, inst.y, inst.z);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(1, 1, 1);
+      if (inst.tile === 2) dummy.scale.y = 0.5;
+      if (inst.tile === 8 || inst.tile === 9) dummy.scale.set(1, 2, 1);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    return mesh;
+  }
+
+  const floorMesh = makeInstanced(new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE), floorMat, floorInstances);
+  if (floorMesh) group.add(floorMesh);
+  const rockMesh = makeInstanced(new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE), rockMat, rockInstances);
+  if (rockMesh) group.add(rockMesh);
+  const mineMesh = makeInstanced(new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE), mineMat, mineInstances);
+  if (mineMesh) group.add(mineMesh);
+  const speedMesh = makeInstanced(new THREE.BoxGeometry(VOXEL_SIZE*0.8, VOXEL_SIZE*0.8, VOXEL_SIZE*0.8), speedMat, speedInstances);
+  if (speedMesh) group.add(speedMesh);
+  const jumpMesh = makeInstanced(new THREE.BoxGeometry(VOXEL_SIZE*0.8, VOXEL_SIZE*0.8, VOXEL_SIZE*0.8), jumpMat, jumpInstances);
+  if (jumpMesh) group.add(jumpMesh);
+  const warpMesh = makeInstanced(new THREE.BoxGeometry(VOXEL_SIZE*0.8, VOXEL_SIZE*0.8, VOXEL_SIZE*0.8), warpMat, warpInstances);
+  if (warpMesh) group.add(warpMesh);
+  const guardMesh = makeInstanced(new THREE.BoxGeometry(VOXEL_SIZE*0.5, VOXEL_SIZE*0.5, VOXEL_SIZE*0.5), guardMat, guardInstances, false);
+  if (guardMesh) group.add(guardMesh);
+  const wallMesh = makeInstanced(new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE), wallMat, wallInstances, false);
+  if (wallMesh) group.add(wallMesh);
+
+  scene.add(group);
+  return {
+    group,
+    startRow,
+    endRow,
+    meshes: { floorMesh, rockMesh, mineMesh, speedMesh, jumpMesh, warpMesh, guardMesh, wallMesh },
+    bonusInstances: { speedInstances, jumpInstances, warpInstances }
+  };
+}
+
+function buildChunks() {
+  for (let r = 0; r < LEVEL_CONFIG.total_rows; r += CHUNK_SIZE) {
+    const end = Math.min(r + CHUNK_SIZE, LEVEL_CONFIG.total_rows);
+    chunks.push(createChunk(r, end));
+  }
+}
+buildChunks();
+
+const bonusItems = [];
+chunks.forEach(chunk => {
+  if (chunk.meshes.speedMesh) {
+    chunk.bonusInstances.speedInstances.forEach((inst, i) => {
+      bonusItems.push({ mesh: chunk.meshes.speedMesh, index: i, baseY: inst.y, type: 5, collected: false, row: inst.r, col: inst.c, x: inst.x, z: inst.z });
+    });
+  }
+  if (chunk.meshes.jumpMesh) {
+    chunk.bonusInstances.jumpInstances.forEach((inst, i) => {
+      bonusItems.push({ mesh: chunk.meshes.jumpMesh, index: i, baseY: inst.y, type: 6, collected: false, row: inst.r, col: inst.c, x: inst.x, z: inst.z });
+    });
+  }
+  if (chunk.meshes.warpMesh) {
+    chunk.bonusInstances.warpInstances.forEach((inst, i) => {
+      bonusItems.push({ mesh: chunk.meshes.warpMesh, index: i, baseY: inst.y, type: 7, collected: false, row: inst.r, col: inst.c, x: inst.x, z: inst.z });
+    });
+  }
+});
+
+// ---------- AVATAR ----------
+const avatarGroup = new THREE.Group();
+const bodyGeo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
+const bodyMat = new THREE.MeshStandardMaterial({ color: COLOR_AVATAR, emissive: 0x004444 });
+const body = new THREE.Mesh(bodyGeo, bodyMat);
+body.castShadow = true;
+body.receiveShadow = true;
+body.position.y = 0.4;
+avatarGroup.add(body);
+
+const visorGeo = new THREE.BoxGeometry(0.5, 0.2, 0.1);
+const visorMat = new THREE.MeshStandardMaterial({ color: COLOR_NEON_CYAN, emissive: COLOR_NEON_CYAN, emissiveIntensity: 1.5 });
+const visor = new THREE.Mesh(visorGeo, visorMat);
+visor.position.set(0, 0.55, 0.45);
+avatarGroup.add(visor);
+
+const baseGeo = new THREE.BoxGeometry(0.9, 0.1, 0.9);
+const baseMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+const base = new THREE.Mesh(baseGeo, baseMat);
+base.position.y = 0.05;
+base.castShadow = true;
+base.receiveShadow = true;
+avatarGroup.add(base);
+
+scene.add(avatarGroup);
+
+// ---------- PARTICLES ----------
+const MAX_PARTICLES = 200;
+const particleGeo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
+const particleMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.5 });
+const particleMesh = new THREE.InstancedMesh(particleGeo, particleMat, MAX_PARTICLES);
+particleMesh.frustumCulled = false;
+particleMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+particleMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_PARTICLES * 3), 3);
+scene.add(particleMesh);
+
+const particles = [];
+for (let i = 0; i < MAX_PARTICLES; i++) {
+  particles.push({ active: false, x:0, y:0, z:0, vx:0, vy:0, vz:0, life:0, maxLife:0.6, color: new THREE.Color() });
+}
+
+function emitParticle(x, y, z, vx, vy, vz, color) {
+  const p = particles.find(p => !p.active);
+  if (!p) return;
+  p.active = true;
+  p.x = x; p.y = y; p.z = z;
+  p.vx = vx; p.vy = vy; p.vz = vz;
+  p.life = p.maxLife;
+  p.color.copy(color);
+}
+
+function updateParticles(dt) {
+  particles.forEach((p, i) => {
+    if (!p.active) {
+      dummy.position.set(0,0,0);
+      dummy.scale.set(0,0,0);
+      dummy.updateMatrix();
+      particleMesh.setMatrixAt(i, dummy.matrix);
+      return;
+    }
+    p.life -= dt;
+    if (p.life <= 0) {
+      p.active = false;
+      dummy.position.set(0,0,0);
+      dummy.scale.set(0,0,0);
+      dummy.updateMatrix();
+      particleMesh.setMatrixAt(i, dummy.matrix);
+      return;
+    }
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.z += p.vz * dt;
+    const scale = p.life / p.maxLife * 0.8;
+    dummy.position.set(p.x, p.y, p.z);
+    dummy.scale.set(scale, scale, scale);
+    dummy.rotation.set(p.life*10, p.life*10, 0);
+    dummy.updateMatrix();
+    particleMesh.setMatrixAt(i, dummy.matrix);
+    particleMesh.setColorAt(i, p.color);
+  });
+  particleMesh.instanceMatrix.needsUpdate = true;
+  if (particleMesh.instanceColor) particleMesh.instanceColor.needsUpdate = true;
+}
+
+// ---------- AUDIO ----------
+let audioCtx = null;
+let windFilter = null;
+let windGain = null;
+let noiseBuffer = null;
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const bufferSize = audioCtx.sampleRate * 2;
+  noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = noiseBuffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+
+  const noiseSource = audioCtx.createBufferSource();
+  noiseSource.buffer = noiseBuffer;
+  noiseSource.loop = true;
+  windFilter = audioCtx.createBiquadFilter();
+  windFilter.type = 'bandpass';
+  windFilter.frequency.value = 400;
+  windFilter.Q.value = 1.0;
+  windGain = audioCtx.createGain();
+  windGain.gain.value = 0.0;
+  noiseSource.connect(windFilter).connect(windGain).connect(audioCtx.destination);
+  noiseSource.start();
+}
+
+function setWindSpeed(speed) {
+  if (!windFilter || !windGain) return;
+  const t = audioCtx.currentTime;
+  const freq = 400 + (speed / MAX_SLIDE_SPEED) * 1400;
+  windFilter.frequency.setTargetAtTime(freq, t, 0.1);
+  windGain.gain.setTargetAtTime(0.15, t, 0.1);
+}
+
+function playJump() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(200, t);
+  osc.frequency.exponentialRampToValueAtTime(650, t + 0.12);
+  gain.gain.setValueAtTime(0.3, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(t);
+  osc.stop(t + 0.12);
+}
+
+function playBoost() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  [440, 880].forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.2, t + i*0.08);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + i*0.08 + 0.25);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t + i*0.08);
+    osc.stop(t + i*0.08 + 0.25);
+  });
+}
+
+function playWarp() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(800, t);
+  osc.frequency.exponentialRampToValueAtTime(200, t + 0.4);
+  const lfo = audioCtx.createOscillator();
+  const lfoGain = audioCtx.createGain();
+  lfo.frequency.value = 30;
+  lfoGain.gain.value = 50;
+  lfo.connect(lfoGain).connect(osc.frequency);
+  gain.gain.setValueAtTime(0.3, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+  osc.connect(gain).connect(audioCtx.destination);
+  lfo.start(t);
+  osc.start(t);
+  osc.stop(t + 0.4);
+  lfo.stop(t + 0.4);
+}
+
+function playExplosion() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const source = audioCtx.createBufferSource();
+  source.buffer = noiseBuffer;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(80, t);
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.5, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+  source.connect(filter).connect(gain).connect(audioCtx.destination);
+  source.start(t);
+  source.stop(t + 0.4);
+}
+
+function playVictory() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const notes = [523.25, 659.25, 783.99, 1046.50];
+  notes.forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = freq;
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 2000;
+    gain.gain.setValueAtTime(0.2, t + i*0.15);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + i*0.15 + 0.3);
+    osc.connect(filter).connect(gain).connect(audioCtx.destination);
+    osc.start(t + i*0.15);
+    osc.stop(t + i*0.15 + 0.3);
+  });
+}
+
+// ---------- GAME STATE ----------
+let state = 'READY';
+let elapsedTime = 0;
+let lastTime = performance.now() / 1000;
+let startFrame = false;
+
+const avatar = {
+  x: 0,
+  y: 0,
+  z: 0,
+  vx: 0,
+  vy: 0,
+  vz: BASE_SLIDE_SPEED,
+  grounded: true,
+  boostTimer: 0,
+};
+
+const keys = { left: false, right: false, up: false };
+const touch = { left: false, right: false };
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { keys.left = true; e.preventDefault(); }
+  if (e.key === 'ArrowRight') { keys.right = true; e.preventDefault(); }
+  if (e.key === 'ArrowUp') {
+    keys.up = true;
+    e.preventDefault();
+    initAudio();
+    if (state === 'READY') {
+      startGame();
+    } else if (state === 'CRASHED' || state === 'CLEARED') {
+      restartGame();
+    }
+  }
+});
+window.addEventListener('keyup', (e) => {
+  if (e.key === 'ArrowLeft') keys.left = false;
+  if (e.key === 'ArrowRight') keys.right = false;
+  if (e.key === 'ArrowUp') keys.up = false;
+});
+
+let touchStartY = 0;
+window.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  initAudio();
+  const t = e.touches[0];
+  touchStartY = t.clientY;
+  if (state === 'READY') {
+    startGame();
+  } else if (state === 'CRASHED' || state === 'CLEARED') {
+    restartGame();
+  } else if (state === 'SLIDING') {
+    if (t.clientX < window.innerWidth / 2) touch.left = true;
+    else touch.right = true;
+  }
+}, { passive: false });
+
+window.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (state !== 'SLIDING' || startFrame) return;
+  const t = e.touches[0];
+  const dy = touchStartY - t.clientY;
+  if (dy > 30) {
+    if (avatar.grounded) {
+      avatar.vy = JUMP_FORCE;
+      avatar.grounded = false;
+      playJump();
+    }
+    touchStartY = t.clientY;
+  }
+}, { passive: false });
+
+window.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  touch.left = false;
+  touch.right = false;
+}, { passive: false });
+
+// ---------- GAME FUNCTIONS ----------
+function startGame() {
+  state = 'SLIDING';
+  startFrame = true;
+  keys.up = false;
+  elapsedTime = 0;
+  avatar.x = 0;
+  avatar.y = getGroundY(0) + 0.4;
+  avatar.z = 0;
+  avatar.vx = 0;
+  avatar.vy = 0;
+  avatar.vz = BASE_SLIDE_SPEED;
+  avatar.grounded = true;
+  avatar.boostTimer = 0;
+  overlay.classList.add('hidden');
+}
+
+function restartGame() {
+  bonusItems.forEach(item => {
+    item.collected = false;
+    dummy.position.set(item.x, item.baseY, item.z);
+    dummy.scale.set(1,1,1);
+    dummy.rotation.set(0,0,0);
+    dummy.updateMatrix();
+    item.mesh.setMatrixAt(item.index, dummy.matrix);
+  });
+  chunks.forEach(chunk => {
+    Object.values(chunk.meshes).forEach(mesh => { if (mesh) mesh.instanceMatrix.needsUpdate = true; });
+  });
+  startGame();
+}
+
+function crash() {
+  if (state !== 'SLIDING') return;
+  state = 'CRASHED';
+  playExplosion();
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = '<div>CRASHED</div><small>Press ArrowUp or Tap to Restart</small>';
+}
+
+function clearStage() {
+  if (state !== 'SLIDING') return;
+  state = 'CLEARED';
+  playVictory();
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `<div>CLEARED!</div><small>Time: ${formatTime(elapsedTime)}<br>Press ArrowUp or Tap to Restart</small>`;
+}
+
+function formatTime(t) {
+  const minutes = Math.floor(t / 60);
+  const seconds = Math.floor(t % 60);
+  const hundredths = Math.floor((t * 100) % 100);
+  return `${String(minutes).padStart(2,'0')}:${String(seconds).padStart(2,'0')}.${String(hundredths).padStart(2,'0')}`;
+}
+
+// ---------- UPDATE LOOP ----------
+function update(dt) {
+  if (state === 'SLIDING') {
+    elapsedTime += dt;
+
+    let steer = 0;
+    if (keys.left || touch.left) steer -= 1;
+    if (keys.right || touch.right) steer += 1;
+    avatar.vx += steer * STEER_SPEED * dt;
+    avatar.vx *= Math.pow(STEER_DAMPING, dt * 60);
+    avatar.x += avatar.vx * dt;
+    avatar.x = Math.max(-W/2 + 0.5, Math.min(W/2 - 0.5, avatar.x));
+
+    const row = Math.floor(avatar.z / VOXEL_SIZE);
+    const slope = getSlopeAtRow(row);
+    let targetSpeed = BASE_SLIDE_SPEED + slope * 4.0;
+    targetSpeed = Math.min(targetSpeed, MAX_SLIDE_SPEED);
+    if (avatar.boostTimer > 0) {
+      targetSpeed *= BOOST_MULTIPLIER;
+      avatar.boostTimer -= dt;
+    }
+    targetSpeed = Math.min(targetSpeed, MAX_SLIDE_SPEED);
+    avatar.vz += (targetSpeed - avatar.vz) * Math.min(1, dt * 5);
+    avatar.vz = Math.min(avatar.vz, MAX_SLIDE_SPEED);
+    avatar.z += avatar.vz * dt;
+
+    const currentRow = Math.floor(avatar.z / VOXEL_SIZE);
+    const groundY = getGroundY(currentRow);
+    if (avatar.grounded) {
+      avatar.y = groundY + 0.4;
+      if (keys.up) {
+        if (!startFrame) {
+          avatar.vy = JUMP_FORCE;
+          avatar.grounded = false;
+          playJump();
+        }
+        keys.up = false;
+      }
+    } else {
+      avatar.vy -= GRAVITY * dt;
+      avatar.y += avatar.vy * dt;
+      if (avatar.y <= groundY + 0.4) {
+        avatar.y = groundY + 0.4;
+        avatar.vy = 0;
+        avatar.grounded = true;
+      }
+    }
+    if (avatar.y < groundY - 12.0) {
+      crash();
+    }
+
+    const col = Math.floor(avatar.x / VOXEL_SIZE + W/2);
+    if (currentRow >= 0 && currentRow < LEVEL_CONFIG.total_rows && col >= 0 && col < W) {
+      const tile = LEVEL_CONFIG.grid[currentRow][col];
+      if (tile === 3 || tile === 4) {
+        const obstacleY = getGroundY(currentRow);
+        if (avatar.y < obstacleY + 0.8) {
+          crash();
+        }
+      } else if (tile === 5 || tile === 6 || tile === 7) {
+        const item = bonusItems.find(b => !b.collected && b.row === currentRow && b.col === col && b.type === tile);
+        if (item) {
+          item.collected = true;
+          dummy.position.set(item.x, item.baseY, item.z);
+          dummy.scale.set(0,0,0);
+          dummy.rotation.set(0,0,0);
+          dummy.updateMatrix();
+          item.mesh.setMatrixAt(item.index, dummy.matrix);
+          item.mesh.instanceMatrix.needsUpdate = true;
+          if (tile === 5) {
+            avatar.boostTimer = BOOST_DURATION;
+            playBoost();
+          } else if (tile === 6) {
+            avatar.vy = SUPER_JUMP_FORCE;
+            avatar.grounded = false;
+            playJump();
+          } else if (tile === 7) {
+            avatar.z += WARP_FORWARD_DISTANCE;
+            avatar.y += WARP_ALTITUDE_BOOST;
+            avatar.grounded = false;
+            playWarp();
+          }
+        }
+      } else if (tile === 9) {
+        clearStage();
+      }
+    }
+
+    if (startFrame) startFrame = false;
+
+    setWindSpeed(avatar.vz);
+
+    if (Math.random() < 0.5) {
+      const color = avatar.boostTimer > 0 ? new THREE.Color(COLOR_NEON_MAGENTA) : (avatar.grounded ? new THREE.Color(COLOR_NEON_CYAN) : new THREE.Color(COLOR_NEON_AMBER));
+      emitParticle(avatar.x, avatar.y - 0.3, avatar.z - 0.5, -avatar.vx*0.2, 0, -avatar.vz*0.5, color);
+    }
+  }
+
+  avatarGroup.position.set(avatar.x, avatar.y, avatar.z);
+  avatarGroup.rotation.z = -avatar.vx * 0.05;
+  avatarGroup.rotation.x = avatar.grounded ? 0 : -avatar.vy * 0.02;
+
+  const camRow = Math.floor(avatar.z / VOXEL_SIZE);
+  const camSlope = getSlopeAtRow(camRow);
+  const targetHeight = THREE.MathUtils.clamp(CAMERA_HEIGHT + camSlope * 0.5, 3.6, 4.6);
+  const targetDistance = THREE.MathUtils.clamp(CAMERA_DISTANCE - camSlope * 0.5, 4.8, 5.5);
+  const camTargetX = avatar.x;
+  const camTargetY = avatar.y + targetHeight;
+  const camTargetZ = avatar.z - targetDistance;
+  camera.position.x += (camTargetX - camera.position.x) * CAMERA_LERP;
+  camera.position.y += (camTargetY - camera.position.y) * CAMERA_LERP;
+  camera.position.z += (camTargetZ - camera.position.z) * CAMERA_LERP;
+  camera.lookAt(avatar.x, avatar.y + 0.35, avatar.z + 1.5);
+
+  sunLight.position.set(avatar.x + 10, avatar.y + 20, avatar.z + 10);
+  sunLight.target.position.set(avatar.x, avatar.y, avatar.z);
+  sunLight.target.updateMatrixWorld();
+
+  const minZ = avatar.z - ACTIVE_WINDOW_BACK;
+  const maxZ = avatar.z + ACTIVE_WINDOW_FRONT;
+  chunks.forEach(chunk => {
+    const chunkMinZ = chunk.startRow * VOXEL_SIZE;
+    const chunkMaxZ = chunk.endRow * VOXEL_SIZE;
+    chunk.group.visible = (chunkMaxZ >= minZ && chunkMinZ <= maxZ);
+  });
+
+  const time = performance.now() / 1000;
+  bonusItems.forEach(item => {
+    if (item.collected) return;
+    dummy.position.set(item.x, item.baseY + Math.sin(time*2 + item.index)*0.2, item.z);
+    dummy.rotation.set(time*2, time*3, 0);
+    dummy.scale.set(1,1,1);
+    dummy.updateMatrix();
+    item.mesh.setMatrixAt(item.index, dummy.matrix);
+  });
+  chunks.forEach(chunk => {
+    Object.values(chunk.meshes).forEach(mesh => { if (mesh) mesh.instanceMatrix.needsUpdate = true; });
+  });
+
+  updateParticles(dt);
+  hud.textContent = formatTime(elapsedTime);
+}
+
+// ---------- RENDER LOOP ----------
+function animate() {
+  requestAnimationFrame(animate);
+  const now = performance.now() / 1000;
+  let dt = now - lastTime;
+  if (dt > 0.1) dt = 0.1;
+  lastTime = now;
+  update(dt);
+  renderer.render(scene, camera);
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+const hud = document.getElementById('hud');
+const overlay = document.getElementById('overlay');
+overlay.innerHTML = '<div>VOXY TRIP</div><small>Press ArrowUp or Tap to Start</small>';
+avatar.y = getGroundY(0) + 0.4;
+avatarGroup.position.set(0, avatar.y, 0);
+animate();
+</script>
+</body>
+</html>

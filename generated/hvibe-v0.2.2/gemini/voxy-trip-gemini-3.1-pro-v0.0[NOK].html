@@ -1,0 +1,1253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Voxy Trip</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #0b0c10;
+            font-family: 'Courier New', Courier, monospace;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none;
+        }
+        #gameCanvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: rgba(11, 12, 16, 0.75);
+            color: #00ffff;
+            z-index: 10;
+            text-shadow: 0 0 10px #00ffff;
+        }
+        h1 {
+            font-size: 4rem;
+            margin: 0 0 20px 0;
+            letter-spacing: 5px;
+            text-transform: uppercase;
+        }
+        .instruction {
+            font-size: 1.2rem;
+            margin-bottom: 10px;
+            color: #fff;
+            text-shadow: none;
+        }
+        .blink {
+            animation: blinker 1.5s linear infinite;
+            margin-top: 30px;
+            font-size: 1.5rem;
+            color: #ffaa00;
+            text-shadow: 0 0 10px #ffaa00;
+        }
+        @keyframes blinker {
+            50% { opacity: 0; }
+        }
+        #hud {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            font-size: 2.5rem;
+            color: #ffaa00;
+            text-shadow: 0 0 10px #ffaa00;
+            z-index: 5;
+            font-weight: bold;
+        }
+        #resultTime {
+            font-size: 2rem;
+            color: #39ff14;
+            margin-top: 20px;
+            text-shadow: 0 0 10px #39ff14;
+            display: none;
+        }
+    </style>
+    <!-- Official Three.js library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="hud">00:00.00</div>
+    <div id="overlay">
+        <h1 id="title">Voxy Trip</h1>
+        <div class="instruction">Desktop: ArrowLeft / ArrowRight to Steer | ArrowUp to Jump</div>
+        <div class="instruction">Mobile: Tap Left/Right to Steer | Swipe Up or Dual Tap to Jump</div>
+        <div id="resultTime"></div>
+        <div class="blink" id="promptText">PRESS ARROW UP OR TAP TO START</div>
+    </div>
+
+    <script>
+        // ==========================================
+        // CONSTANTS & GLOBALS
+        // ==========================================
+        const VOXEL_SIZE = 1.0;
+        const GRAVITY = 16.0;
+        const BASE_SLIDE_SPEED = 7.0;
+        const MAX_SLIDE_SPEED = 14.0;
+        const JUMP_FORCE = 6.5;
+        const SUPER_JUMP_FORCE = 12.0;
+        const BOOST_MULTIPLIER = 1.35;
+        const BOOST_DURATION = 2.0;
+        const WARP_FORWARD_DISTANCE = 10.0;
+        const WARP_ALTITUDE_BOOST = 3.5;
+        const STEER_SPEED = 13.0;
+        const STEER_DAMPING = 0.86;
+        const CAMERA_DISTANCE = 5.5;
+        const CAMERA_HEIGHT = 4.2;
+        const CAMERA_LERP = 0.1;
+
+        const COLOR_CANYON_SAND = 0xd97736;
+        const COLOR_CANYON_ROCK = 0x8b3a1a;
+        const COLOR_BASALT = 0x221111;
+        const COLOR_NEON_CYAN = 0x00f3ff; 
+        const COLOR_NEON_LIME = 0x39ff14; 
+        const COLOR_NEON_MAGENTA = 0xff007f;
+        const COLOR_NEON_AMBER = 0xffaa00;
+        const COLOR_AVATAR = 0x00ffff;
+
+        const TRACK_WIDTH = 12;
+        const W = 12;
+
+        const MIN_OBSTACLE_SPACING_ROWS = 10;
+        const ACTIVE_WINDOW_BACK = 15.0;
+        const ACTIVE_WINDOW_FRONT = 85.0;
+
+        const FLOOR_SURFACE_OFFSET = 0.5;
+        const BONUS_FLOAT_OFFSET = 1.2;
+        const OBSTACLE_CENTER_OFFSET = 1.0;
+
+        // ==========================================
+        // DECLARATIVE LEVEL GENERATOR
+        // ==========================================
+        function generateLevelConfig() {
+            const config = {
+                name: "Neon Canyon Descent",
+                width: W,
+                total_rows: 370,
+                slope_profile: new Array(370).fill(0),
+                grid: [],
+                ground_y: []
+            };
+
+            let currentY = 0;
+            let lastObstacleRow = -MIN_OBSTACLE_SPACING_ROWS;
+
+            for (let r = 0; r < config.total_rows; r++) {
+                let rowTiles = new Array(W).fill(0); // 0 = Pit by default
+                let phase = r < 70 ? 1 : (r < 150 ? 2 : (r < 230 ? 3 : (r < 290 ? 4 : 5)));
+                let trackActiveWidth = phase === 2 ? 6 : W;
+                let trackStart = Math.floor((W - trackActiveWidth) / 2);
+                let trackEnd = trackStart + trackActiveWidth;
+
+                // Determine Slope
+                let slopeDelta = 0;
+                if (r > 10) {
+                    if (phase === 1) slopeDelta = -0.1;
+                    else if (phase === 2) slopeDelta = -0.15;
+                    else if (phase === 3) slopeDelta = -0.12;
+                    else if (phase === 4) slopeDelta = 0; // Flat before abyss
+                    else if (phase === 5) slopeDelta = -0.2;
+                }
+                config.slope_profile[r] = slopeDelta;
+                currentY += slopeDelta;
+                config.ground_y[r] = currentY;
+
+                // Base floor
+                for (let c = trackStart; c < trackEnd; c++) {
+                    rowTiles[c] = slopeDelta < -0.12 ? 2 : 1;
+                }
+
+                // Phase 4 Abyss break
+                if (phase === 4 && r > 240 && r < 255) {
+                    rowTiles.fill(0); 
+                }
+
+                // Place Warp for Abyss
+                if (phase === 4 && r === 238) {
+                    rowTiles[Math.floor(W/2)] = 7; // Warp Teleporter
+                }
+
+                // Place obstacles & boosts
+                if (r > 20 && phase !== 4 && (r - lastObstacleRow >= MIN_OBSTACLE_SPACING_ROWS)) {
+                    // Try to place an obstacle or boost
+                    if (Math.random() < 0.6) {
+                        lastObstacleRow = r;
+                        let obsCount = Math.floor(Math.random() * 2) + 1; // max 2
+                        let availableCols = [];
+                        for(let c = trackStart; c < trackEnd; c++) availableCols.push(c);
+                        
+                        // Shuffle available
+                        for (let i = availableCols.length - 1; i > 0; i--) {
+                            const j = Math.floor(Math.random() * (i + 1));
+                            [availableCols[i], availableCols[j]] = [availableCols[j], availableCols[i]];
+                        }
+
+                        // Pick columns, ensuring at least 2 adjacent columns remain open
+                        // A simple heuristic: don't block the very middle 2 lanes
+                        let mid1 = Math.floor(W/2) - 1;
+                        let mid2 = mid1 + 1;
+                        let placed = 0;
+                        for (let i=0; i<availableCols.length && placed < obsCount; i++) {
+                            let c = availableCols[i];
+                            if (c !== mid1 && c !== mid2) {
+                                if (phase === 3) {
+                                    rowTiles[c] = Math.random() < 0.5 ? 4 : 5; // Mine or Speed Boost
+                                } else if (phase === 5 && Math.random() < 0.3) {
+                                    rowTiles[c] = 6; // Jump boost
+                                } else {
+                                    rowTiles[c] = 3; // Rock
+                                }
+                                placed++;
+                            }
+                        }
+                    }
+                }
+
+                // Ensure finish gate
+                if (r === config.total_rows - 5) {
+                    rowTiles.fill(1);
+                    rowTiles[Math.floor(W/2) - 1] = 9;
+                    rowTiles[Math.floor(W/2)] = 9;
+                }
+                // Ensure start gate
+                if (r === 2) {
+                    rowTiles[Math.floor(W/2) - 1] = 8;
+                    rowTiles[Math.floor(W/2)] = 8;
+                }
+
+                config.grid.push(rowTiles);
+            }
+            return config;
+        }
+
+        const LEVEL_CONFIG = generateLevelConfig();
+
+        function getGroundY(r) {
+            if (r < 0) return LEVEL_CONFIG.ground_y[0];
+            if (r >= LEVEL_CONFIG.total_rows) return LEVEL_CONFIG.ground_y[LEVEL_CONFIG.total_rows - 1];
+            return LEVEL_CONFIG.ground_y[r];
+        }
+
+        function getTile(r, c) {
+            if (r < 0 || r >= LEVEL_CONFIG.total_rows || c < 0 || c >= W) return 0;
+            return LEVEL_CONFIG.grid[r][c];
+        }
+
+        // ==========================================
+        // PROCEDURAL AUDIO SYNTHESIZER
+        // ==========================================
+        class AudioEngine {
+            constructor() {
+                this.ctx = null;
+                this.masterGain = null;
+                this.windFilter = null;
+                this.windGain = null;
+                this.initialized = false;
+            }
+
+            init() {
+                if (this.initialized) return;
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                this.ctx = new AudioContext();
+                this.masterGain = this.ctx.createGain();
+                this.masterGain.gain.value = 0.7;
+                this.masterGain.connect(this.ctx.destination);
+
+                // Wind Loop
+                const bufferSize = this.ctx.sampleRate * 2.0; 
+                const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+                const output = noiseBuffer.getChannelData(0);
+                for (let i = 0; i < bufferSize; i++) output[i] = Math.random() * 2 - 1;
+                
+                const noiseSrc = this.ctx.createBufferSource();
+                noiseSrc.buffer = noiseBuffer;
+                noiseSrc.loop = true;
+
+                this.windFilter = this.ctx.createBiquadFilter();
+                this.windFilter.type = 'bandpass';
+                this.windFilter.frequency.value = 400;
+                this.windFilter.Q.value = 0.5;
+
+                this.windGain = this.ctx.createGain();
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>voxy-trip: Neon Canyon Descent</title>
+<style>
+    body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background-color: #000;
+        font-family: 'Courier New', Courier, monospace;
+        user-select: none;
+        -webkit-user-select: none;
+        touch-action: none;
+    }
+    canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+    }
+    #ui-layer {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        pointer-events: none;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+    }
+    .overlay {
+        background: rgba(0, 0, 0, 0.75);
+        border: 2px solid #00f3ff;
+        box-shadow: 0 0 20px #00f3ff;
+        padding: 30px;
+        text-align: center;
+        color: #fff;
+        pointer-events: auto;
+    }
+    h1 {
+        color: #ffaa00;
+        text-shadow: 0 0 10px #ffaa00;
+        margin-top: 0;
+        text-transform: uppercase;
+        font-size: 2.5rem;
+    }
+    p {
+        font-size: 1.2rem;
+        color: #fff;
+    }
+    .accent-cyan { color: #00f3ff; font-weight: bold; }
+    .accent-lime { color: #39ff14; font-weight: bold; }
+    .accent-magenta { color: #ff007f; font-weight: bold; }
+    
+    #suspense-hud {
+        position: absolute;
+        top: 20px;
+        right: 30px;
+        font-size: 2rem;
+        color: #ffaa00;
+        text-shadow: 0 0 10px #ffaa00;
+        font-weight: bold;
+    }
+
+    #start-overlay { display: block; }
+    #crash-overlay { display: none; border-color: #ff0000; box-shadow: 0 0 20px #ff0000; }
+    #clear-overlay { display: none; border-color: #39ff14; box-shadow: 0 0 20px #39ff14; }
+
+    .blink {
+        animation: blinker 1.5s linear infinite;
+    }
+    @keyframes blinker {
+        50% { opacity: 0; }
+    }
+</style>
+<script src="[https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js](https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js)"></script>
+</head>
+<body>
+    <div id="suspense-hud">00:00.00</div>
+    
+    <div id="ui-layer">
+        <div id="start-overlay" class="overlay">
+            <h1>Neon Canyon Descent</h1>
+            <p>Slide: <span class="accent-cyan">ArrowLeft / ArrowRight</span> (or Tap Sides)</p>
+            <p>Jump: <span class="accent-lime">ArrowUp</span> (or Swipe Up)</p>
+            <p style="margin-top:20px; font-size:0.9rem;">
+                <span class="accent-cyan">■ Speed</span> | 
+                <span class="accent-lime">■ Jump</span> | 
+                <span class="accent-magenta">■ Warp</span>
+            </p>
+            <h2 class="blink" style="color: #00f3ff; margin-top:30px;">PRESS ARROW UP TO START</h2>
+        </div>
+
+        <div id="crash-overlay" class="overlay">
+            <h1 style="color:#ff0000; text-shadow:0 0 10px #ff0000;">CRITICAL FAILURE</h1>
+            <p id="crash-reason">Signal Lost.</p>
+            <h2 class="blink" style="color: #00f3ff; margin-top:30px;">PRESS ARROW UP TO RESTART</h2>
+        </div>
+
+        <div id="clear-overlay" class="overlay">
+            <h1 style="color:#39ff14; text-shadow:0 0 10px #39ff14;">SYSTEM CLEARED</h1>
+            <p>Final Time: <span id="final-time" class="accent-cyan">00:00.00</span></p>
+            <h2 class="blink" style="color: #00f3ff; margin-top:30px;">PRESS ARROW UP TO RESTART</h2>
+        </div>
+    </div>
+
+<script>
+/**
+ * STRICT CONSTANTS & GLOBALS
+ */
+const VOXEL_SIZE = 1.0;
+const GRAVITY = 16.0;
+const BASE_SLIDE_SPEED = 7.0;
+const MAX_SLIDE_SPEED = 14.0;
+const JUMP_FORCE = 6.5;
+const SUPER_JUMP_FORCE = 12.0;
+const BOOST_MULTIPLIER = 1.35;
+const BOOST_DURATION = 2.0;
+const WARP_FORWARD_DISTANCE = 10.0;
+const WARP_ALTITUDE_BOOST = 3.5;
+const STEER_SPEED = 13.0;
+const STEER_DAMPING = 0.86;
+const CAMERA_LERP = 0.1;
+
+const COLOR_CANYON_SAND = 0xd97736;
+const COLOR_CANYON_ROCK = 0x8b3a1a;
+const COLOR_NEON_CYAN = 0x00f3ff;
+const COLOR_NEON_LIME = 0x39ff14;
+const COLOR_NEON_MAGENTA = 0xff007f;
+const COLOR_NEON_AMBER = 0xffaa00;
+const COLOR_AVATAR = 0x00ffff;
+const COLOR_BASALT = 0x221111;
+
+const W = 12;
+const MIN_OBSTACLE_SPACING_ROWS = 10;
+const ACTIVE_WINDOW_BACK = 15.0;
+const ACTIVE_WINDOW_FRONT = 85.0;
+
+const FLOOR_SURFACE_OFFSET = 0.5;
+const BONUS_FLOAT_OFFSET = 1.2;
+const OBSTACLE_CENTER_OFFSET = 1.0;
+
+const CHUNK_SIZE = 30;
+
+/**
+ * ENGINE-AGNOSTIC LEVEL GENERATOR (Pre-computed Declarative Config)
+ */
+function generateLevelConfig() {
+    const config = {
+        name: "Neon Canyon Descent",
+        width: W,
+        total_rows: 360,
+        slope_profile: [],
+        elevations: [],
+        grid: [],
+        bonuses: [],   // { r, c, id }
+        hazards: []    // { r, c, id }
+    };
+
+    let currentElevation = 0;
+    let lastObstacleRow = -MIN_OBSTACLE_SPACING_ROWS;
+
+    for (let r = 0; r < config.total_rows; r++) {
+        // Phase logic
+        let slope = 0;
+        let trackWidth = W;
+        let phase = 1;
+        
+        if (r < 70) { phase = 1; slope = -0.1; trackWidth = 12; }
+        else if (r < 150) { phase = 2; slope = -0.3; trackWidth = 6; }
+        else if (r < 230) { phase = 3; slope = -0.4; trackWidth = 8; }
+        else if (r < 290) { phase = 4; slope = -0.5; trackWidth = 8; }
+        else { phase = 5; slope = -0.8; trackWidth = 10; }
+
+        currentElevation += slope;
+        config.slope_profile.push(slope);
+        config.elevations.push(currentElevation);
+
+        let rowData = new Array(W).fill(0);
+        let leftBound = Math.floor((W - trackWidth) / 2);
+        let rightBound = leftBound + trackWidth;
+
+        // Base Track (Tile 1 & 2)
+        if (phase === 4 && r > 240 && r < 250) {
+            // The Great Abyss Leap (Void)
+            // Leave rowData as 0
+        } else {
+            for (let c = leftBound; c < rightBound; c++) {
+                rowData[c] = (slope < -0.3) ? 2 : 1; 
+            }
+        }
+
+        // Walls (decorative, not solid obstacles, placed outside bounds)
+        if (leftBound > 0) rowData[leftBound - 1] = 10; // Canyon Wall Marker
+        if (rightBound < W) rowData[rightBound] = 10;
+
+        // Population (Obstacles & Boosts)
+        if (r > 20 && r < 350 && (r - lastObstacleRow) >= MIN_OBSTACLE_SPACING_ROWS) {
+            let placed = false;
+            let availableCols = [];
+            for (let c = leftBound + 1; c < rightBound - 1; c++) availableCols.push(c);
+            
+            // Randomly shuffle available columns
+            availableCols.sort(() => Math.random() - 0.5);
+
+            if (phase === 4 && r === 238) {
+                // Warp teleporter right before abyss
+                config.bonuses.push({ r, c: availableCols[0], id: 7 });
+                placed = true;
+            } else if (Math.random() < 0.6) {
+                // Place Obstacle
+                let obsCount = (phase > 2 && Math.random() < 0.5) ? 2 : 1;
+                for (let i = 0; i < obsCount; i++) {
+                    let c = availableCols[i];
+                    let obsId = (phase === 3) ? 4 : 3; // Minefield = mines, else rocks
+                    config.hazards.push({ r, c, id: obsId });
+                }
+                // Maybe add a boost near it
+                if (Math.random() < 0.3) {
+                    let c = availableCols[obsCount];
+                    let boostId = (phase === 5) ? 6 : 5; // Jump pad in final, else speed
+                    config.bonuses.push({ r, c, id: boostId });
+                }
+                placed = true;
+            } else if (Math.random() < 0.3) {
+                // Just a boost
+                let boostId = 5;
+                if (phase === 5) boostId = 6; // Jump pad
+                if (phase === 2 && Math.random() < 0.2) boostId = 7; // Rare warp
+                config.bonuses.push({ r, c: availableCols[0], id: boostId });
+            }
+
+            if (placed) lastObstacleRow = r;
+        }
+
+        // Start / Finish lines
+        if (r === 5) config.bonuses.push({ r, c: 6, id: 8 });
+        if (r === 355) config.bonuses.push({ r, c: 6, id: 9 });
+
+        config.grid.push(rowData);
+    }
+    return config;
+}
+
+const LEVEL_CONFIG = generateLevelConfig();
+
+/**
+ * PURE SYNTHETIC AUDIO ENGINE
+ */
+class AudioEngine {
+    constructor() {
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        this.glideNode = null;
+        this.glideFilter = null;
+        this.glideGain = null;
+        this.setupGlide();
+    }
+
+    resume() {
+        if (this.ctx.state === 'suspended') this.ctx.resume();
+    }
+
+    setupGlide() {
+        const bufferSize = this.ctx.sampleRate * 2;
+        const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+
+        this.glideNode = this.ctx.createBufferSource();
+        this.glideNode.buffer = buffer;
+        this.glideNode.loop = true;
+
+        this.glideFilter = this.ctx.createBiquadFilter();
+        this.glideFilter.type = 'bandpass';
+        this.glideFilter.frequency.value = 400;
+        this.glideFilter.Q.value = 0.5;
+
+        this.glideGain = this.ctx.createGain();
+        this.glideGain.gain.value = 0;
+
+        this.glideNode.connect(this.glideFilter);
+        this.glideFilter.connect(this.glideGain);
+        this.glideGain.connect(this.ctx.destination);
+        this.glideNode.start();
+    }
+
+    updateGlide(speed, isGrounded) {
+        if (!isGrounded) {
+            this.glideGain.gain.setTargetAtTime(0.05, this.ctx.currentTime, 0.1);
+        } else {
+            const normalizedSpeed = Math.max(0, speed - BASE_SLIDE_SPEED) / (MAX_SLIDE_SPEED * BOOST_MULTIPLIER - BASE_SLIDE_SPEED);
+            const targetFreq = 400 + (normalizedSpeed * 1400); // 400 to 1800 Hz
+            this.glideFilter.frequency.setTargetAtTime(targetFreq, this.ctx.currentTime, 0.1);
+            this.glideGain.gain.setTargetAtTime(0.15 + normalizedSpeed * 0.1, this.ctx.currentTime, 0.1);
+        }
+    }
+
+    stopGlide() {
+        this.glideGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.1);
+    }
+
+    playJump() {
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(200, this.ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(650, this.ctx.currentTime + 0.12);
+        gain.gain.setValueAtTime(0.3, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.12);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start();
+        osc.stop(this.ctx.currentTime + 0.12);
+    }
+
+    playBoost() {
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(440, this.ctx.currentTime);
+        osc.frequency.setValueAtTime(880, this.ctx.currentTime + 0.1);
+        gain.gain.setValueAtTime(0.3, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.25);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start();
+        osc.stop(this.ctx.currentTime + 0.25);
+    }
+
+    playWarp() {
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(800, this.ctx.currentTime);
+        osc.frequency.linearRampToValueAtTime(200, this.ctx.currentTime + 0.4);
+        gain.gain.setValueAtTime(0.4, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.4);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start();
+        osc.stop(this.ctx.currentTime + 0.4);
+    }
+
+    playExplosion() {
+        const bufferSize = this.ctx.sampleRate * 0.4;
+        const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+
+        const noise = this.ctx.createBufferSource();
+        noise.buffer = buffer;
+        const filter = this.ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(800, this.ctx.currentTime);
+        filter.frequency.exponentialRampToValueAtTime(80, this.ctx.currentTime + 0.4);
+        const gain = this.ctx.createGain();
+        gain.gain.setValueAtTime(0.6, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.4);
+
+        noise.connect(filter);
+        filter.connect(gain);
+        gain.connect(this.ctx.destination);
+        noise.start();
+    }
+
+    playVictory() {
+        const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
+        notes.forEach((freq, i) => {
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+            osc.type = 'square';
+            osc.frequency.value = freq;
+            
+            const filter = this.ctx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = 1500;
+
+            const time = this.ctx.currentTime + i * 0.15;
+            gain.gain.setValueAtTime(0, time);
+            gain.gain.linearRampToValueAtTime(0.2, time + 0.05);
+            gain.gain.exponentialRampToValueAtTime(0.01, time + 0.4);
+
+            osc.connect(filter);
+            filter.connect(gain);
+            gain.connect(this.ctx.destination);
+            osc.start(time);
+            osc.stop(time + 0.4);
+        });
+    }
+}
+
+/**
+ * THREE.JS ENGINE & GAME LOGIC
+ */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a0a1a);
+scene.fog = new THREE.FogExp2(0x1a0a1a, 0.015);
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 150);
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+// Lighting
+const ambientLight = new THREE.AmbientLight(0x404050, 0.6);
+scene.add(ambientLight);
+
+const dirLight = new THREE.DirectionalLight(0xffddaa, 1.2);
+dirLight.position.set(-20, 40, -10);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.width = 1024;
+dirLight.shadow.mapSize.height = 1024;
+dirLight.shadow.camera.near = 0.5;
+dirLight.shadow.camera.far = 100;
+const d = 30;
+dirLight.shadow.camera.left = -d;
+dirLight.shadow.camera.right = d;
+dirLight.shadow.camera.top = d;
+dirLight.shadow.camera.bottom = -d;
+scene.add(dirLight);
+
+// Materials
+const matTrack = new THREE.MeshStandardMaterial({ color: COLOR_CANYON_SAND, roughness: 0.9, metalness: 0.1 });
+const matWall = new THREE.MeshStandardMaterial({ color: 0x5a2a1a, roughness: 1.0 });
+const matRock = new THREE.MeshStandardMaterial({ color: COLOR_CANYON_ROCK, roughness: 1.0 });
+const matMine = new THREE.MeshStandardMaterial({ color: COLOR_BASALT, roughness: 0.8 });
+const matSpeed = new THREE.MeshStandardMaterial({ color: COLOR_NEON_CYAN, emissive: COLOR_NEON_CYAN, emissiveIntensity: 0.8 });
+const matJump = new THREE.MeshStandardMaterial({ color: COLOR_NEON_LIME, emissive: COLOR_NEON_LIME, emissiveIntensity: 0.8 });
+const matWarp = new THREE.MeshStandardMaterial({ color: COLOR_NEON_MAGENTA, emissive: COLOR_NEON_MAGENTA, emissiveIntensity: 0.8 });
+const matGate = new THREE.MeshStandardMaterial({ color: COLOR_NEON_AMBER, emissive: COLOR_NEON_AMBER, emissiveIntensity: 0.8 });
+
+// Geometries (Strict Offset Handling)
+// Translate origin to bottom so scale and positioning aligns base to surface
+const geoBox = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE).translate(0, VOXEL_SIZE / 2, 0); 
+const geoBonus = new THREE.BoxGeometry(VOXEL_SIZE * 0.8, VOXEL_SIZE * 0.8, VOXEL_SIZE * 0.8).translate(0, (VOXEL_SIZE * 0.8) / 2, 0);
+
+// Rendering Chunks
+const chunks = [];
+const numChunks = Math.ceil(LEVEL_CONFIG.total_rows / CHUNK_SIZE);
+
+// Helper function to create an instanced mesh with frustumCulled = false constraint
+function createInstanced(geo, mat, count) {
+    if (count === 0) count = 1; // prevent zero count error
+    const mesh = new THREE.InstancedMesh(geo, mat, count);
+    mesh.frustumCulled = false; // MANDATED RESOLUTION
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.count = 0; // Will be populated
+    return mesh;
+}
+
+const dummy = new THREE.Object3D();
+const activeEntities = []; // For collisions and rotation
+
+for (let i = 0; i < numChunks; i++) {
+    const chunk = {
+        group: new THREE.Group(),
+        startZ: i * CHUNK_SIZE * VOXEL_SIZE,
+        endZ: (i + 1) * CHUNK_SIZE * VOXEL_SIZE,
+        meshTrack: createInstanced(geoBox, matTrack, CHUNK_SIZE * W),
+        meshWall: createInstanced(geoBox, matWall, CHUNK_SIZE * 4),
+        meshRock: createInstanced(geoBox, matRock, CHUNK_SIZE * 2),
+        meshMine: createInstanced(geoBox, matMine, CHUNK_SIZE * 2),
+        meshSpeed: createInstanced(geoBonus, matSpeed, CHUNK_SIZE),
+        meshJump: createInstanced(geoBonus, matJump, CHUNK_SIZE),
+        meshWarp: createInstanced(geoBonus, matWarp, CHUNK_SIZE),
+        meshGate: createInstanced(geoBox, matGate, 10),
+        items: [] // References for update loops
+    };
+
+    chunk.group.add(chunk.meshTrack);
+    chunk.group.add(chunk.meshWall);
+    chunk.group.add(chunk.meshRock);
+    chunk.group.add(chunk.meshMine);
+    chunk.group.add(chunk.meshSpeed);
+    chunk.group.add(chunk.meshJump);
+    chunk.group.add(chunk.meshWarp);
+    chunk.group.add(chunk.meshGate);
+    chunk.group.visible = false;
+    scene.add(chunk.group);
+    chunks.push(chunk);
+}
+
+// Populate Level Data
+for (let r = 0; r < LEVEL_CONFIG.total_rows; r++) {
+    const chunkIdx = Math.floor(r / CHUNK_SIZE);
+    const chunk = chunks[chunkIdx];
+    const rowY = LEVEL_CONFIG.elevations[r];
+    const z = r * VOXEL_SIZE;
+
+    // Floor & Walls
+    for (let c = 0; c < W; c++) {
+        const val = LEVEL_CONFIG.grid[r][c];
+        const x = (c - W/2) * VOXEL_SIZE;
+        if (val === 1 || val === 2) {
+            dummy.position.set(x, rowY, z);
+            dummy.updateMatrix();
+            chunk.meshTrack.setMatrixAt(chunk.meshTrack.count++, dummy.matrix);
+        } else if (val === 10) {
+            // Stack walls
+            for(let wy=1; wy<=3; wy++) {
+                dummy.position.set(x, rowY + wy * VOXEL_SIZE, z);
+                dummy.updateMatrix();
+                chunk.meshWall.setMatrixAt(chunk.meshWall.count++, dummy.matrix);
+            }
+        }
+    }
+}
+
+// Populate Items (Hazards & Bonuses)
+function placeEntity(r, c, id, isBonus) {
+    const chunkIdx = Math.floor(r / CHUNK_SIZE);
+    const chunk = chunks[chunkIdx];
+    const rowY = LEVEL_CONFIG.elevations[r];
+    const x = (c - W/2) * VOXEL_SIZE;
+    const z = r * VOXEL_SIZE;
+    
+    let meshRef, yOffset;
+    if (id === 3) { meshRef = chunk.meshRock; yOffset = FLOOR_SURFACE_OFFSET; } // Flush on floor (base rests at groundY + 0.5)
+    else if (id === 4) { meshRef = chunk.meshMine; yOffset = FLOOR_SURFACE_OFFSET; }
+    else if (id === 5) { meshRef = chunk.meshSpeed; yOffset = BONUS_FLOAT_OFFSET - 0.4; } // Hover calculation: bottom at +0.8
+    else if (id === 6) { meshRef = chunk.meshJump; yOffset = BONUS_FLOAT_OFFSET - 0.4; }
+    else if (id === 7) { meshRef = chunk.meshWarp; yOffset = BONUS_FLOAT_OFFSET - 0.4; }
+    else if (id === 8 || id === 9) { meshRef = chunk.meshGate; yOffset = FLOOR_SURFACE_OFFSET; }
+
+    const y = rowY + yOffset;
+    
+    if (meshRef) {
+        const instanceId = meshRef.count++;
+        dummy.position.set(x, y, z);
+        dummy.rotation.set(0,0,0);
+        dummy.scale.set(1,1,1);
+        dummy.updateMatrix();
+        meshRef.setMatrixAt(instanceId, dummy.matrix);
+        
+        const entity = { id, x, y, z, mesh: meshRef, iId: instanceId, active: true, isBonus };
+        chunk.items.push(entity);
+        activeEntities.push(entity);
+    }
+}
+
+LEVEL_CONFIG.hazards.forEach(h => placeEntity(h.r, h.c, h.id, false));
+LEVEL_CONFIG.bonuses.forEach(b => placeEntity(b.r, b.c, b.id, true));
+
+// Finalize instance matrices
+chunks.forEach(c => {
+    c.meshTrack.instanceMatrix.needsUpdate = true;
+    c.meshWall.instanceMatrix.needsUpdate = true;
+    c.meshRock.instanceMatrix.needsUpdate = true;
+    c.meshMine.instanceMatrix.needsUpdate = true;
+    c.meshSpeed.instanceMatrix.needsUpdate = true;
+    c.meshJump.instanceMatrix.needsUpdate = true;
+    c.meshWarp.instanceMatrix.needsUpdate = true;
+    c.meshGate.instanceMatrix.needsUpdate = true;
+});
+
+// Avatar & Particle System
+const geoAvatar = geoBox.clone();
+const matAvatar = new THREE.MeshStandardMaterial({ color: COLOR_AVATAR, emissive: COLOR_AVATAR, emissiveIntensity: 0.5 });
+const avatarMesh = new THREE.Mesh(geoAvatar, matAvatar);
+scene.add(avatarMesh);
+
+const maxParticles = 100;
+const geoParticle = geoBox.clone();
+const matParticle = new THREE.MeshBasicMaterial({ color: COLOR_NEON_CYAN });
+const meshParticles = new THREE.InstancedMesh(geoParticle, matParticle, maxParticles);
+meshParticles.frustumCulled = false;
+scene.add(meshParticles);
+const particles = [];
+let particleIndex = 0;
+
+// Game State
+let gameState = 'READY'; // READY, SLIDING, CRASHED, CLEARED
+const audio = new AudioEngine();
+
+const avatar = {
+    x: 0, y: 0, z: 0,
+    vx: 0, vy: 0, vz: 0,
+    grounded: true,
+    boostTimer: 0,
+    bankAngle: 0
+};
+
+const input = { left: false, right: false, jump: false, jumpConsumed: false };
+
+// UI Elements
+const uiStart = document.getElementById('start-overlay');
+const uiCrash = document.getElementById('crash-overlay');
+const uiClear = document.getElementById('clear-overlay');
+const uiHud = document.getElementById('suspense-hud');
+const uiTime = document.getElementById('final-time');
+const uiReason = document.getElementById('crash-reason');
+let startTime = 0;
+let elapsedTime = 0;
+let startedThisFrame = false; // State isolation guard
+
+function formatTime(s) {
+    const mins = Math.floor(s / 60);
+    const secs = Math.floor(s % 60);
+    const ms = Math.floor((s % 1) * 100);
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
+}
+
+function getGroundY(rFloat) {
+    const r0 = Math.floor(rFloat);
+    const r1 = r0 + 1;
+    if (r0 < 0) return LEVEL_CONFIG.elevations[0];
+    if (r1 >= LEVEL_CONFIG.total_rows) return LEVEL_CONFIG.elevations[LEVEL_CONFIG.total_rows - 1];
+    
+    // Check for void
+    if (LEVEL_CONFIG.grid[r0] && LEVEL_CONFIG.grid[r0][Math.floor(W/2)] === 0) {
+        // Void pit exception - no floor here
+        return -9999;
+    }
+
+    const y0 = LEVEL_CONFIG.elevations[r0];
+    const y1 = LEVEL_CONFIG.elevations[r1];
+    const frac = rFloat - r0;
+    return (1.0 - frac) * y0 + frac * y1;
+}
+
+function setState(newState, reason = "") {
+    gameState = newState;
+    uiStart.style.display = 'none';
+    uiCrash.style.display = 'none';
+    uiClear.style.display = 'none';
+    
+    if (newState === 'READY') {
+        uiStart.style.display = 'block';
+        resetGame();
+    } else if (newState === 'SLIDING') {
+        audio.resume();
+        startTime = performance.now() / 1000;
+    } else if (newState === 'CRASHED') {
+        uiCrash.style.display = 'block';
+        uiReason.innerText = reason;
+        audio.playExplosion();
+        audio.stopGlide();
+    } else if (newState === 'CLEARED') {
+        uiClear.style.display = 'block';
+        uiTime.innerText = formatTime(elapsedTime);
+        audio.playVictory();
+        audio.stopGlide();
+    }
+}
+
+function resetGame() {
+    avatar.x = 0;
+    avatar.z = 2.0;
+    avatar.vx = 0;
+    avatar.vy = 0;
+    avatar.vz = BASE_SLIDE_SPEED;
+    avatar.grounded = true;
+    avatar.boostTimer = 0;
+    
+    const initialGroundY = getGroundY(avatar.z / VOXEL_SIZE);
+    avatar.y = initialGroundY + FLOOR_SURFACE_OFFSET;
+    
+    // Re-activate items
+    activeEntities.forEach(e => {
+        if (!e.active) {
+            e.active = true;
+            dummy.position.set(e.x, e.y, e.z);
+            dummy.scale.set(1,1,1);
+            dummy.updateMatrix();
+            e.mesh.setMatrixAt(e.iId, dummy.matrix);
+            e.mesh.instanceMatrix.needsUpdate = true;
+        }
+    });
+}
+
+// Controls
+function handleStartOrJump() {
+    if (gameState === 'READY' || gameState === 'CRASHED' || gameState === 'CLEARED') {
+        setState('SLIDING');
+        startedThisFrame = true; // MANDATED GUARD: Prevent jump on same frame
+    } else if (gameState === 'SLIDING') {
+        input.jump = true;
+    }
+}
+
+window.addEventListener('keydown', (e) => {
+    // STRICT RULE: Only Arrow keys
+    if (e.code === 'ArrowLeft') input.left = true;
+    if (e.code === 'ArrowRight') input.right = true;
+    if (e.code === 'ArrowUp') handleStartOrJump();
+});
+window.addEventListener('keyup', (e) => {
+    if (e.code === 'ArrowLeft') input.left = false;
+    if (e.code === 'ArrowRight') input.right = false;
+    if (e.code === 'ArrowUp') { input.jump = false; input.jumpConsumed = false; }
+});
+
+let touchStartX = 0;
+let touchStartY = 0;
+window.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    touchStartX = t.clientX;
+    touchStartY = t.clientY;
+    
+    if (gameState !== 'SLIDING') {
+        handleStartOrJump();
+        return;
+    }
+    
+    if (t.clientX < window.innerWidth / 2) input.left = true;
+    else input.right = true;
+}, {passive: false});
+
+window.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    if (gameState === 'SLIDING' && touchStartY - t.clientY > 50) { // Swipe up
+        input.jump = true;
+    }
+}, {passive: false});
+
+window.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    input.left = false;
+    input.right = false;
+    input.jump = false;
+    input.jumpConsumed = false;
+});
+
+// Game Loop
+let lastTime = performance.now();
+function animate(time) {
+    requestAnimationFrame(animate);
+    const dt = Math.min((time - lastTime) / 1000, 0.05);
+    lastTime = time;
+
+    if (gameState === 'SLIDING') {
+        elapsedTime = (time / 1000) - startTime;
+        uiHud.innerText = formatTime(elapsedTime);
+
+        // --- Physics & Kinematics ---
+        const currentR = avatar.z / VOXEL_SIZE;
+        const groundY = getGroundY(currentR);
+        const surfaceY = groundY + FLOOR_SURFACE_OFFSET;
+        
+        let currentSlope = 0;
+        if (currentR >= 0 && currentR < LEVEL_CONFIG.total_rows) {
+            currentSlope = LEVEL_CONFIG.slope_profile[Math.floor(currentR)] || 0;
+        }
+
+        // Forward Velocity
+        let targetSpeed = BASE_SLIDE_SPEED;
+        if (currentSlope < -0.2) targetSpeed = MAX_SLIDE_SPEED; // Downhill acceleration
+        if (avatar.boostTimer > 0) {
+            targetSpeed *= BOOST_MULTIPLIER;
+            avatar.boostTimer -= dt;
+        }
+        
+        avatar.vz += (targetSpeed - avatar.vz) * 5.0 * dt;
+        avatar.vz = Math.min(avatar.vz, MAX_SLIDE_SPEED * BOOST_MULTIPLIER); // Speed constraint
+        avatar.z += avatar.vz * dt;
+
+        // Lateral Steering
+        let targetVx = 0;
+        let targetBank = 0;
+        if (input.left) { targetVx = -STEER_SPEED; targetBank = 0.3; }
+        if (input.right) { targetVx = STEER_SPEED; targetBank = -0.3; }
+        
+        avatar.vx = avatar.vx * STEER_DAMPING + targetVx * (1 - STEER_DAMPING);
+        avatar.x += avatar.vx * dt;
+        // Keep within track bounds roughly
+        avatar.x = Math.max(Math.min(avatar.x, (W/2 - 1) * VOXEL_SIZE), -(W/2 - 1) * VOXEL_SIZE);
+        avatar.bankAngle += (targetBank - avatar.bankAngle) * 10 * dt;
+
+        // Jump Handling & Gravity
+        if (input.jump && avatar.grounded && !input.jumpConsumed && !startedThisFrame) {
+            avatar.vy = JUMP_FORCE;
+            avatar.grounded = false;
+            input.jumpConsumed = true;
+            audio.playJump();
+        }
+
+        if (!avatar.grounded) {
+            avatar.vy -= GRAVITY * dt;
+            avatar.y += avatar.vy * dt;
+            
+            // Landing check
+            if (avatar.y <= surfaceY && surfaceY > -9000) {
+                avatar.y = surfaceY;
+                avatar.vy = 0;
+                avatar.grounded = true;
+            }
+        } else {
+            // Gliding firmly on the ground (MANDATED ZERO-BOUNCE INTERPOLATION)
+            if (surfaceY < -9000) { // Off the edge / void
+                avatar.grounded = false;
+            } else {
+                avatar.y = surfaceY;
+                avatar.vy = 0;
+            }
+        }
+
+        // Fall Threshold Check (Relative)
+        if (avatar.y < groundY - 12.0) {
+            setState('CRASHED', 'Fell into the abyss.');
+        }
+
+        // --- Collisions & Entity Updates (Active Window) ---
+        const activeBack = avatar.z - ACTIVE_WINDOW_BACK;
+        const activeFront = avatar.z + ACTIVE_WINDOW_FRONT;
+
+        for (let i = 0; i < activeEntities.length; i++) {
+            const e = activeEntities[i];
+            
+            // Animation for active bonuses
+            if (e.isBonus && e.active && e.z >= activeBack && e.z <= activeFront) {
+                dummy.position.set(e.x, e.y, e.z);
+                // MANDATED RESOLUTION: Local Rotation
+                const rotAngle = time * 0.002 + e.iId;
+                dummy.rotation.set(rotAngle, rotAngle, 0); 
+                dummy.updateMatrix();
+                e.mesh.setMatrixAt(e.iId, dummy.matrix);
+                e.mesh.instanceMatrix.needsUpdate = true;
+            }
+
+            // Collision Detection
+            if (e.active && Math.abs(e.z - avatar.z) < 0.8 && Math.abs(e.x - avatar.x) < 0.8) {
+                // Vertical check
+                const hitboxClearance = e.y + 0.8;
+                if (avatar.y < hitboxClearance) {
+                    // Hit
+                    if (e.id === 3 || e.id === 4) {
+                        setState('CRASHED', e.id === 4 ? 'Hit explosive mine.' : 'Impacted solid rock.');
+                    } else if (e.isBonus) {
+                        e.active = false;
+                        // Consume visual
+                        dummy.scale.set(0,0,0);
+                        dummy.updateMatrix();
+                        e.mesh.setMatrixAt(e.iId, dummy.matrix);
+                        e.mesh.instanceMatrix.needsUpdate = true;
+
+                        if (e.id === 5) {
+                            avatar.boostTimer = BOOST_DURATION;
+                            audio.playBoost();
+                        } else if (e.id === 6) {
+                            avatar.vy = SUPER_JUMP_FORCE;
+                            avatar.grounded = false;
+                            audio.playBoost();
+                        } else if (e.id === 7) {
+                            // Warp
+                            avatar.z += WARP_FORWARD_DISTANCE;
+                            avatar.y += WARP_ALTITUDE_BOOST;
+                            avatar.grounded = false;
+                            audio.playWarp();
+                        } else if (e.id === 8 || e.id === 9) {
+                            if (e.id === 9) setState('CLEARED');
+                        }
+                    }
+                }
+            }
+        }
+
+        // Particles
+        let trailColor = COLOR_NEON_CYAN;
+        if (avatar.boostTimer > 0) trailColor = COLOR_NEON_MAGENTA;
+        if (!avatar.grounded) trailColor = COLOR_NEON_AMBER;
+        
+        matParticle.color.setHex(trailColor);
+
+        // Emit
+        const p = {
+            active: true,
+            life: 0.6,
+            x: avatar.x + (Math.random()-0.5)*0.5,
+            y: avatar.y + 0.2, // Emit near base
+            z: avatar.z,
+            scale: 0.5
+        };
+        particles[particleIndex] = p;
+        particleIndex = (particleIndex + 1) % maxParticles;
+
+        // Avatar Transform
+        avatarMesh.position.set(avatar.x, avatar.y, avatar.z);
+        avatarMesh.rotation.z = avatar.bankAngle;
+
+        // Audio Update
+        audio.updateGlide(avatar.vz, avatar.grounded);
+
+        startedThisFrame = false;
+    }
+
+    // --- Particle Animation (Always) ---
+    for (let i = 0; i < maxParticles; i++) {
+        const p = particles[i];
+        if (p && p.active) {
+            p.life -= dt;
+            if (p.life <= 0) {
+                p.active = false;
+                dummy.scale.set(0,0,0);
+            } else {
+                dummy.position.set(p.x, p.y, p.z);
+                const s = p.scale * (p.life / 0.6);
+                dummy.scale.set(s,s,s);
+                dummy.rotation.set(p.life*10, p.life*10, 0);
+            }
+            dummy.updateMatrix();
+            meshParticles.setMatrixAt(i, dummy.matrix);
+        }
+    }
+    meshParticles.instanceMatrix.needsUpdate = true;
+
+    // --- Chunk Visibility Culling ---
+    for (let i = 0; i < numChunks; i++) {
+        const chunk = chunks[i];
+        if (chunk.endZ > avatar.z - ACTIVE_WINDOW_BACK && chunk.startZ < avatar.z + ACTIVE_WINDOW_FRONT) {
+            chunk.group.visible = true;
+        } else {
+            chunk.group.visible = false;
+        }
+    }
+
+    // --- Camera Tracking (MANDATED MONOTONIC LERP) ---
+    // targetHeight: 3.6 to 4.6
+    // targetDist: 4.8 to 5.5
+    // pitch angle: 45 to 60 dynamically
+    
+    // Smooth slope estimate
+    const currentR = avatar.z / VOXEL_SIZE;
+    const r0 = Math.floor(currentR);
+    const slope = LEVEL_CONFIG.slope_profile[r0] || 0;
+    
+    const targetHeight = Math.max(3.6, Math.min(4.6, 4.2 - slope * 1.5));
+    const targetDist = Math.max(4.8, Math.min(5.5, 5.2 + slope));
+    
+    const camTargetX = avatar.x;
+    const camTargetY = avatar.y + targetHeight;
+    const camTargetZ = avatar.z - targetDist;
+
+    camera.position.x += (camTargetX - camera.position.x) * CAMERA_LERP;
+    camera.position.y += (camTargetY - camera.position.y) * CAMERA_LERP;
+    camera.position.z += (camTargetZ - camera.position.z) * CAMERA_LERP;
+
+    // Directional light shadow map tracking
+    dirLight.position.x = avatar.x - 20;
+    dirLight.position.z = avatar.z - 10;
+    dirLight.target.position.set(avatar.x, avatar.y, avatar.z);
+    dirLight.target.updateMatrixWorld();
+
+    camera.lookAt(avatar.x, avatar.y + 0.35, avatar.z + 1.5);
+    renderer.render(scene, camera);
+}
+
+// Initial Setup
+resetGame();
+animate(performance.now());
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+</script>
+</body>
+</html>

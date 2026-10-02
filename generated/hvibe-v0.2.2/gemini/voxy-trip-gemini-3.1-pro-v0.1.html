@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Voxy Trip</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #110022;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        #hud {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #ffaa00;
+            font-family: monospace;
+            font-size: 28px;
+            font-weight: bold;
+            text-shadow: 0 0 10px #ffaa00;
+            z-index: 5;
+            pointer-events: none;
+        }
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(17, 0, 34, 0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+            font-family: monospace;
+        }
+        h1 {
+            font-size: 4rem;
+            margin: 0;
+            text-shadow: 0 0 20px currentColor;
+            color: #00ffff;
+            text-align: center;
+        }
+        p {
+            font-size: 1.5rem;
+            color: #ffaa00;
+            margin-top: 20px;
+            text-shadow: 0 0 10px #ffaa00;
+            text-align: center;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+    <div id="hud">00:00.00</div>
+    <div id="overlay">
+        <h1 id="title">VOXY TRIP</h1>
+        <p id="msg">PRESS UP OR TAP TO START</p>
+    </div>
+
+    <script>
+        // Highvibe Spec v0.2.2 - Constants
+        const VOXEL_SIZE = 1.0;
+        const GRAVITY = 16.0;
+        const BASE_SLIDE_SPEED = 7.0;
+        const MAX_SLIDE_SPEED = 14.0;
+        const JUMP_FORCE = 6.5;
+        const SUPER_JUMP_FORCE = 12.0;
+        const BOOST_MULTIPLIER = 1.35;
+        const BOOST_DURATION = 2.0;
+        const WARP_FORWARD_DISTANCE = 10.0;
+        const WARP_ALTITUDE_BOOST = 3.5;
+        const STEER_SPEED = 13.0;
+        const STEER_DAMPING = 0.86;
+        const CAMERA_LERP = 0.1;
+
+        const COLOR_CANYON_SAND = 0xd97736;
+        const COLOR_CANYON_ROCK = 0x8b3a1a;
+        const COLOR_NEON_CYAN = 0x00f3ff;
+        const COLOR_NEON_LIME = 0x39ff14;
+        const COLOR_NEON_MAGENTA = 0xff007f;
+        const COLOR_NEON_AMBER = 0xffaa00;
+        const COLOR_AVATAR = 0x00ffff;
+
+        const TRACK_WIDTH = 12;
+        const ACTIVE_WINDOW_BACK = 15.0;
+        const ACTIVE_WINDOW_FRONT = 85.0;
+
+        const SURFACE_Y_OFFSET = 0.5;
+        const BONUS_FLOAT_OFFSET = 1.3;
+        const OBSTACLE_CENTER_OFFSET = 1.0;
+
+        // Engine-Agnostic Declarative Level Config
+        const LEVEL_CONFIG = (function() {
+            const width = TRACK_WIDTH;
+            const total_rows = 360;
+            const slope_profile = [];
+            const grid = [];
+
+            for(let r = 0; r < total_rows; r++) {
+                let row = new Array(width).fill(0);
+                let slope = 0;
+                let minC = 0, maxC = 11;
+                
+                if (r < 70) {
+                    // Phase 1: Initiation
+                    slope = -0.1; 
+                    for(let c = minC; c <= maxC; c++) row[c] = 1;
+                    if (r === 20 || r === 40) row[5] = 5; // Speed booster
+                } else if (r < 150) {
+                    // Phase 2: Narrow Chasm
+                    slope = -0.15;
+                    minC = 3; maxC = 8;
+                    for(let c = minC; c <= maxC; c++) row[c] = 1;
+                    if (r % 15 === 0 && r > 75) {
+                        let obCol = minC + 1; 
+                        row[obCol] = 3; // Rock
+                        row[obCol + 2] = 3; // Rock
+                    }
+                } else if (r < 230) {
+                    // Phase 3: Minefield Alley
+                    slope = -0.2;
+                    minC = 1; maxC = 10;
+                    for(let c = minC; c <= maxC; c++) row[c] = 1;
+                    if (r % 15 === 0 && r > 155) {
+                        let ob = minC + 2;
+                        row[ob] = 4; // Mine
+                        row[ob + 3] = 4; 
+                        row[ob + 1] = 5; // Speed boost
+                    }
+                } else if (r < 290) {
+                    // Phase 4: Great Abyss Leap
+                    slope = -0.25;
+                    minC = 2; maxC = 9;
+                    if (r >= 250 && r <= 256) {
+                        // The Chasm Void - Array stays 0 (Pit)
+                    } else {
+                        for(let c = minC; c <= maxC; c++) row[c] = 1;
+                    }
+                    if (r === 248) {
+                        row[5] = 7; row[6] = 7; // Warp Teleporters
+                    }
+                } else {
+                    // Phase 5: Final Downhill Sprint
+                    slope = -0.3;
+                    minC = 0; maxC = 11;
+                    for(let c = minC; c <= maxC; c++) row[c] = 1;
+                    if (r % 20 === 0 && r < 340) {
+                        row[5] = 6; row[6] = 6; // Jump boosters
+                    }
+                    if (r % 20 === 10 && r < 340) { // 10 rows clear spacing
+                        row[5] = 3; row[6] = 3; // Rocks under the jump arc
+                    }
+                }
+                
+                // Gates
+                if (r === 5) {
+                    row[5] = 8; row[6] = 8;
+                }
+                if (r === 355) {
+                    for(let c=0; c<12; c++) row[c] = 9;
+                }
+                
+                slope_profile.push(slope);
+                grid.push(row);
+            }
+            return { name: "Neon Canyon Descent", width, total_rows, slope_profile, grid };
+        })();
+
+        // Precompute Ground Elevation Array
+        const ground_y_arr = [];
+        let acc = 0;
+        for(let r=0; r <= LEVEL_CONFIG.total_rows; r++) {
+            ground_y_arr.push(acc);
+            if(r < LEVEL_CONFIG.total_rows) acc += LEVEL_CONFIG.slope_profile[r];
+        }
+        function getGroundY(r) {
+            if(r < 0) return ground_y_arr[0];
+            if(r >= LEVEL_CONFIG.total_rows) return ground_y_arr[LEVEL_CONFIG.total_rows - 1];
+            return ground_y_arr[r];
+        }
+
+        // Global State
+        let state = 'READY'; // READY, SLIDING, CRASHED, CLEARED
+        let timeNow = 0, startTime = 0, lastTime = performance.now();
+        const hud = document.getElementById('hud');
+        const overlay = document.getElementById('overlay');
+        const title = document.getElementById('title');
+        const msg = document.getElementById('msg');
+        
+        const keys = { left: false, right: false, up: false };
+        const touchZones = { left: false, right: false, up: false };
+
+        const avatar = {
+            x: 0, y: getGroundY(0) + SURFACE_Y_OFFSET, z: 0,
+            vx: 0, vy: 0, vz: 0,
+            grounded: true, boostTimer: 0
+        };
+
+        const global_hazards = [];
+        const global_bonus_items = [];
+        const particles = [];
+        let particleTimer = 0;
+
+        // Procedural Audio Engine
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let glideNoise, glideFilter, glideGain;
+
+        function initGlide() {
+            let bufferSize = audioCtx.sampleRate * 2;
+            let buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            let data = buffer.getChannelData(0);
+            for(let i=0; i<bufferSize; i++) data[i] = Math.random()*2-1;
+            glideNoise = audioCtx.createBufferSource();
+            glideNoise.buffer = buffer;
+            glideNoise.loop = true;
+            glideFilter = audioCtx.createBiquadFilter();
+            glideFilter.type = 'bandpass';
+            glideFilter.frequency.value = 400;
+            glideGain = audioCtx.createGain();
+            glideGain.gain.value = 0;
+            glideNoise.connect(glideFilter); glideFilter.connect(glideGain); glideGain.connect(audioCtx.destination);
+            glideNoise.start();
+        }
+
+        function playAudio(type) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            let t = audioCtx.currentTime;
+            
+            if (type === 'jump') {
+                let osc = audioCtx.createOscillator();
+                let gain = audioCtx.createGain();
+                osc.frequency.setValueAtTime(200, t);
+                osc.frequency.exponentialRampToValueAtTime(650, t + 0.12);
+                gain.gain.setValueAtTime(0.5, t);
+                gain.gain.exponentialRampToValueAtTime(0.01, t + 0.12);
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.start(t); osc.stop(t + 0.12);
+            } else if (type === 'boost') {
+                let osc1 = audioCtx.createOscillator(); osc1.type = 'triangle';
+                let osc2 = audioCtx.createOscillator(); osc2.type = 'triangle';
+                let gain = audioCtx.createGain();
+                osc1.frequency.setValueAtTime(440, t);
+                osc2.frequency.setValueAtTime(880, t + 0.1);
+                gain.gain.setValueAtTime(0.3, t);
+                gain.gain.linearRampToValueAtTime(0, t + 0.25);
+                osc1.connect(gain); osc2.connect(gain); gain.connect(audioCtx.destination);
+                osc1.start(t); osc1.stop(t+0.25);
+                osc2.start(t+0.1); osc2.stop(t+0.25);
+            } else if (type === 'warp') {
+                let osc = audioCtx.createOscillator();
+                let gain = audioCtx.createGain();
+                osc.frequency.setValueAtTime(800, t);
+                osc.frequency.linearRampToValueAtTime(200, t + 0.3);
+                let lfo = audioCtx.createOscillator();
+                lfo.frequency.value = 20;
+                let lfoGain = audioCtx.createGain();
+                lfoGain.gain.value = 50;
+                lfo.connect(lfoGain); lfoGain.connect(osc.frequency);
+                gain.gain.setValueAtTime(0.4, t);
+                gain.gain.linearRampToValueAtTime(0, t+0.3);
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.start(t); lfo.start(t); osc.stop(t+0.3); lfo.stop(t+0.3);
+            } else if (type === 'crash') {
+                let bufferSize = audioCtx.sampleRate * 0.4;
+                let buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+                let data = buffer.getChannelData(0);
+                for(let i=0; i<bufferSize; i++) data[i] = Math.random()*2-1;
+                let noise = audioCtx.createBufferSource();
+                noise.buffer = buffer;
+                let filter = audioCtx.createBiquadFilter();
+                filter.type = 'lowpass';
+                filter.frequency.setValueAtTime(80, t);
+                let gain = audioCtx.createGain();
+                gain.gain.setValueAtTime(0.8, t);
+                gain.gain.exponentialRampToValueAtTime(0.01, t+0.4);
+                noise.connect(filter); filter.connect(gain); gain.connect(audioCtx.destination);
+                noise.start(t);
+            } else if (type === 'win') {
+                const notes = [523.25, 659.25, 783.99, 1046.50];
+                notes.forEach((freq, i) => {
+                    let osc = audioCtx.createOscillator();
+                    osc.type = 'square';
+                    let filter = audioCtx.createBiquadFilter();
+                    filter.type = 'lowpass'; filter.frequency.value = 1200;
+                    let gain = audioCtx.createGain();
+                    gain.gain.setValueAtTime(0, t + i*0.15);
+                    gain.gain.linearRampToValueAtTime(0.3, t + i*0.15 + 0.05);
+                    gain.gain.linearRampToValueAtTime(0, t + i*0.15 + 0.3);
+                    osc.frequency.value = freq;
+                    osc.connect(filter); filter.connect(gain); gain.connect(audioCtx.destination);
+                    osc.start(t + i*0.15); osc.stop(t + i*0.15 + 0.3);
+                });
+            }
+        }
+
+        // Three.js Scene Setup
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x110022);
+        
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 150);
+        const renderer = new THREE.WebGLRenderer({ antialias: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        // Lighting
+        const ambLight = new THREE.AmbientLight(0xffaaaa, 0.4);
+        scene.add(ambLight);
+
+        const dLight = new THREE.DirectionalLight(0xffddaa, 1.0);
+        dLight.castShadow = true;
+        dLight.shadow.mapSize.width = 1024;
+        dLight.shadow.mapSize.height = 1024;
+        dLight.shadow.camera.left = -15; dLight.shadow.camera.right = 15;
+        dLight.shadow.camera.top = 15; dLight.shadow.camera.bottom = -15;
+        dLight.shadow.camera.near = 0.5; dLight.shadow.camera.far = 100;
+        scene.add(dLight);
+        scene.add(dLight.target);
+
+        // Materials & Geometries
+        const geoBox = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+        const matSand = new THREE.MeshLambertMaterial({ color: COLOR_CANYON_SAND });
+        const matRock = new THREE.MeshLambertMaterial({ color: COLOR_CANYON_ROCK });
+        const matMine = new THREE.MeshLambertMaterial({ color: 0x221111 });
+        const matCyan = new THREE.MeshLambertMaterial({ color: COLOR_NEON_CYAN, emissive: COLOR_NEON_CYAN, emissiveIntensity: 0.8 });
+        const matLime = new THREE.MeshLambertMaterial({ color: COLOR_NEON_LIME, emissive: COLOR_NEON_LIME, emissiveIntensity: 0.8 });
+        const matMagenta = new THREE.MeshLambertMaterial({ color: COLOR_NEON_MAGENTA, emissive: COLOR_NEON_MAGENTA, emissiveIntensity: 0.8 });
+        const matAmber = new THREE.MeshLambertMaterial({ color: COLOR_NEON_AMBER, emissive: COLOR_NEON_AMBER, emissiveIntensity: 0.8 });
+
+        const dummy = new THREE.Object3D();
+        const CHUNK_SIZE = 30;
+        const NUM_CHUNKS = Math.ceil(LEVEL_CONFIG.total_rows / CHUNK_SIZE);
+        const chunks = [];
+
+        // Build Scene Chunks
+        for (let chunkIdx = 0; chunkIdx < NUM_CHUNKS; chunkIdx++) {
+            let startR = chunkIdx * CHUNK_SIZE;
+            let endR = Math.min(startR + CHUNK_SIZE, LEVEL_CONFIG.total_rows);
+            let cnt = { floor:0, cliff:0, rail:0, rock:0, mine:0, boost5:0, boost6:0, boost7:0, gate:0 };
+            
+            for (let r = startR; r < endR; r++) {
+                for(let col=0; col<TRACK_WIDTH; col++) {
+                    let t = LEVEL_CONFIG.grid[r][col];
+                    if (t!==0) cnt.floor++;
+                    if (t===3) cnt.rock++;
+                    if (t===4) cnt.mine++;
+                    if (t===5) cnt.boost5++;
+                    if (t===6) cnt.boost6++;
+                    if (t===7) cnt.boost7++;
+                    if (t===8||t===9) cnt.gate++;
+                    if (t!==0 && (col===0 || col===TRACK_WIDTH-1)) cnt.rail++;
+                }
+                for (let xOff = -12; xOff <= 12; xOff++) {
+                    if (xOff >= -6 && xOff <= 5) continue;
+                    cnt.cliff += Math.abs(xOff < 0 ? xOff + 6 : xOff - 5);
+                }
+            }
+
+            let meshes = {};
+            let createMesh = (type, geo, mat, count, shadow, cull) => {
+                if (count === 0) return null;
+                let mesh = new THREE.InstancedMesh(geo, mat, count);
+                mesh.frustumCulled = cull;
+                mesh.castShadow = shadow; mesh.receiveShadow = shadow;
+                return mesh;
+            };
+
+            meshes.floor = createMesh(1, geoBox, matSand, cnt.floor, true, false);
+            meshes.cliff = createMesh(2, geoBox, matRock, cnt.cliff, false, false); // Cliffs don't cast shadows
+            meshes.rail = createMesh(3, geoBox, matCyan, cnt.rail, false, false);
+            meshes.rock = createMesh(4, geoBox, matRock, cnt.rock, true, false);
+            meshes.mine = createMesh(5, geoBox, matMine, cnt.mine, true, false);
+            meshes[5] = createMesh(6, new THREE.BoxGeometry(0.8,0.8,0.8), matCyan, cnt.boost5, true, false);
+            meshes[6] = createMesh(7, new THREE.BoxGeometry(0.8,0.8,0.8), matLime, cnt.boost6, true, false);
+            meshes[7] = createMesh(8, new THREE.BoxGeometry(0.8,0.8,0.8), matMagenta, cnt.boost7, true, false);
+            meshes.gate = createMesh(9, geoBox, matAmber, cnt.gate, true, false);
+
+            let group = new THREE.Group();
+            for(let key in meshes) if(meshes[key]) group.add(meshes[key]);
+            scene.add(group);
+
+            let idx = { floor:0, cliff:0, rail:0, rock:0, mine:0, boost5:0, boost6:0, boost7:0, gate:0 };
+            
+            for (let r = startR; r < endR; r++) {
+                let gy = getGroundY(r);
+                let pz = r * VOXEL_SIZE;
+                
+                // Track & Items
+                for(let col=0; col<TRACK_WIDTH; col++) {
+                    let t = LEVEL_CONFIG.grid[r][col];
+                    let px = (col - 5.5) * VOXEL_SIZE;
+                    
+                    if (t !== 0) {
+                        dummy.position.set(px, gy, pz); dummy.updateMatrix();
+                        meshes.floor.setMatrixAt(idx.floor++, dummy.matrix);
+                        if (col===0 || col===TRACK_WIDTH-1) {
+                            dummy.position.set(px, gy + 1.0, pz); dummy.updateMatrix();
+                            meshes.rail.setMatrixAt(idx.rail++, dummy.matrix);
+                        }
+                    }
+                    if (t===3) {
+                        dummy.position.set(px, gy + OBSTACLE_CENTER_OFFSET, pz); dummy.updateMatrix();
+                        meshes.rock.setMatrixAt(idx.rock++, dummy.matrix);
+                        global_hazards.push({type:t, x:px, y:gy + OBSTACLE_CENTER_OFFSET, z:pz});
+                    }
+                    if (t===4) {
+                        dummy.position.set(px, gy + OBSTACLE_CENTER_OFFSET, pz); dummy.updateMatrix();
+                        meshes.mine.setMatrixAt(idx.mine++, dummy.matrix);
+                        global_hazards.push({type:t, x:px, y:gy + OBSTACLE_CENTER_OFFSET, z:pz});
+                    }
+                    if (t>=5 && t<=7) {
+                        let bIdx = t===5 ? idx.boost5++ : (t===6 ? idx.boost6++ : idx.boost7++);
+                        global_bonus_items.push({
+                            type: t, chunk: chunkIdx, index: bIdx,
+                            x: px, baseY: gy + BONUS_FLOAT_OFFSET, z: pz, picked: false
+                        });
+                    }
+                    if (t===8||t===9) {
+                        dummy.position.set(px, gy + 2.0, pz); dummy.updateMatrix();
+                        meshes.gate.setMatrixAt(idx.gate++, dummy.matrix);
+                    }
+                }
+                
+                // Cliffs
+                for (let xOff = -12; xOff <= 12; xOff++) {
+                    if (xOff >= -6 && xOff <= 5) continue;
+                    let dist = Math.abs(xOff < 0 ? xOff + 6 : xOff - 5);
+                    let h = Math.floor((r % 7 + dist) / 2) + dist; // deterministic pseudo-random height
+                    let px = (xOff > 0 ? xOff - 0.5 : xOff + 0.5) * VOXEL_SIZE;
+                    for (let y = 0; y < h; y++) {
+                        dummy.position.set(px, gy + 1.0 + y, pz); dummy.updateMatrix();
+                        meshes.cliff.setMatrixAt(idx.cliff++, dummy.matrix);
+                    }
+                }
+            }
+            chunks.push({ group, meshes, startZ: startR * VOXEL_SIZE, endZ: endR * VOXEL_SIZE });
+        }
+
+        // Particle System
+        const particleInst = new THREE.InstancedMesh(new THREE.BoxGeometry(0.3,0.3,0.3), new THREE.MeshLambertMaterial({color: 0xffffff}), 300);
+        particleInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        scene.add(particleInst);
+
+        // Avatar Setup
+        const avatarGroup = new THREE.Group();
+        const matAv = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: COLOR_AVATAR, emissiveIntensity: 0.5 });
+        const body = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.8), matAv);
+        body.position.y = 0.4;
+        body.castShadow = true;
+        const visor = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.2, 0.1), new THREE.MeshLambertMaterial({ color: 0x000000 }));
+        visor.position.set(0, 0.5, 0.45);
+        avatarGroup.add(body);
+        avatarGroup.add(visor);
+        scene.add(avatarGroup);
+
+        // Controls
+        function startGame() {
+            if (state !== 'SLIDING') {
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                if (!glideNoise) initGlide();
+                
+                avatar.x = 0; avatar.y = getGroundY(0) + SURFACE_Y_OFFSET; avatar.z = 0;
+                avatar.vx = 0; avatar.vy = 0; avatar.vz = 0;
+                avatar.grounded = true; avatar.boostTimer = 0;
+                
+                for(let b of global_bonus_items) b.picked = false;
+                particles.length = 0;
+                
+                startTime = performance.now();
+                state = 'SLIDING';
+                overlay.style.display = 'none';
+                
+                keys.up = false; touchZones.up = false; // Isolate frame-0 jump impulse
+            }
+        }
+
+        function crashGame() {
+            state = 'CRASHED';
+            playAudio('crash');
+            overlay.style.display = 'flex';
+            title.innerText = 'CRASHED';
+            title.style.color = '#ff007f';
+            msg.innerText = 'PRESS UP OR TAP TO RESTART';
+        }
+
+        function winGame() {
+            state = 'CLEARED';
+            playAudio('win');
+            overlay.style.display = 'flex';
+            title.innerText = 'COURSE CLEARED';
+            title.style.color = '#39ff14';
+            msg.innerText = 'TIME: ' + hud.innerText;
+        }
+
+        window.addEventListener('keydown', e => {
+            if (e.code === 'ArrowLeft') keys.left = true;
+            if (e.code === 'ArrowRight') keys.right = true;
+            if (e.code === 'ArrowUp') {
+                if (state !== 'SLIDING') startGame();
+                else keys.up = true;
+            }
+        });
+        window.addEventListener('keyup', e => {
+            if (e.code === 'ArrowLeft') keys.left = false;
+            if (e.code === 'ArrowRight') keys.right = false;
+            if (e.code === 'ArrowUp') keys.up = false;
+        });
+
+        window.addEventListener('touchstart', e => {
+            if (state !== 'SLIDING') { startGame(); return; }
+            if (e.touches.length > 1) {
+                touchZones.up = true;
+            } else {
+                if (e.touches[0].clientX < window.innerWidth / 2) touchZones.left = true;
+                else touchZones.right = true;
+            }
+        }, {passive: false});
+        window.addEventListener('touchend', e => {
+            touchZones.left = false; touchZones.right = false; touchZones.up = false;
+            if (e.touches.length > 0) {
+                if (e.touches[0].clientX < window.innerWidth / 2) touchZones.left = true;
+                else touchZones.right = true;
+            }
+        });
+
+        // Main Loop
+        function animate() {
+            requestAnimationFrame(animate);
+            timeNow = performance.now();
+            let dt = Math.min((timeNow - lastTime) / 1000.0, 0.05);
+            lastTime = timeNow;
+
+            if (state === 'SLIDING' || state === 'CLEARED') {
+                let elapsed = (timeNow - startTime) / 1000;
+                let m = Math.floor(elapsed / 60).toString().padStart(2, '0');
+                let s = Math.floor(elapsed % 60).toString().padStart(2, '0');
+                let ms = Math.floor((elapsed * 100) % 100).toString().padStart(2, '0');
+                hud.innerText = `${m}:${s}.${ms}`;
+            }
+
+            if (state === 'SLIDING') {
+                let r_exact = avatar.z / VOXEL_SIZE;
+                let r_floor = Math.floor(r_exact);
+                let c_floor = Math.round(avatar.x / VOXEL_SIZE + 5.5);
+                
+                let isPit = false;
+                let slope = 0;
+                if (r_floor >= 0 && r_floor < LEVEL_CONFIG.total_rows) {
+                    slope = LEVEL_CONFIG.slope_profile[r_floor];
+                    if (c_floor >= 0 && c_floor < TRACK_WIDTH) {
+                        if (LEVEL_CONFIG.grid[r_floor][c_floor] === 0) isPit = true;
+                    } else isPit = true;
+                } else isPit = true;
+
+                if (avatar.grounded && isPit) avatar.grounded = false;
+
+                const frac = r_exact - r_floor;
+                const current_ground_y = (1.0 - frac) * getGroundY(r_floor) + frac * getGroundY(r_floor + 1);
+                const current_surface_y = current_ground_y + SURFACE_Y_OFFSET;
+
+                // Speed / Physics
+                let targetSpeed = BASE_SLIDE_SPEED + (-slope * 20.0);
+                if (targetSpeed > MAX_SLIDE_SPEED) targetSpeed = MAX_SLIDE_SPEED;
+                
+                if (avatar.boostTimer > 0) {
+                    avatar.boostTimer -= dt;
+                    targetSpeed *= BOOST_MULTIPLIER;
+                }
+                
+                avatar.vz += (targetSpeed - avatar.vz) * dt * 3.0;
+                if (avatar.vz > MAX_SLIDE_SPEED && avatar.boostTimer <= 0) avatar.vz = MAX_SLIDE_SPEED;
+                avatar.z += avatar.vz * dt;
+
+                // Steering
+                if (keys.left || touchZones.left) avatar.vx -= STEER_SPEED * dt;
+                if (keys.right || touchZones.right) avatar.vx += STEER_SPEED * dt;
+                avatar.vx *= Math.pow(STEER_DAMPING, dt * 60);
+                avatar.x += avatar.vx * dt;
+                
+                if (avatar.x < -5.5) { avatar.x = -5.5; avatar.vx = 0; }
+                if (avatar.x > 5.5) { avatar.x = 5.5; avatar.vx = 0; }
+
+                // Jumping
+                if ((keys.up || touchZones.up) && avatar.grounded && !isPit) {
+                    avatar.vy = JUMP_FORCE;
+                    avatar.grounded = false;
+                    playAudio('jump');
+                }
+
+                if (!avatar.grounded) {
+                    avatar.vy -= GRAVITY * dt;
+                    avatar.y += avatar.vy * dt;
+                    
+                    if (!isPit && avatar.y <= current_surface_y && avatar.vy <= 0) {
+                        avatar.y = current_surface_y;
+                        avatar.vy = 0;
+                        avatar.grounded = true;
+                    }
+                    if (avatar.y < current_ground_y - 12.0) crashGame();
+                } else {
+                    avatar.y = current_surface_y;
+                }
+
+                // Collisions - Hazards
+                for (let h of global_hazards) {
+                    if (Math.abs(h.z - avatar.z) < 1.0 && Math.abs(h.x - avatar.x) < 0.8) {
+                        if (avatar.y < h.y + 0.8) crashGame();
+                    }
+                }
+
+                // Collisions - Bonus Items
+                for (let b of global_bonus_items) {
+                    if (b.picked) continue;
+                    if (Math.abs(b.z - avatar.z) < 0.8 && Math.abs(b.x - avatar.x) < 0.8 && Math.abs(avatar.y - b.baseY) < 1.0) {
+                        b.picked = true;
+                        let mesh = chunks[b.chunk].meshes[b.type];
+                        if (mesh) {
+                            dummy.position.set(0,0,0); dummy.scale.set(0,0,0); dummy.updateMatrix();
+                            mesh.setMatrixAt(b.index, dummy.matrix);
+                            mesh.instanceMatrix.needsUpdate = true;
+                        }
+                        if (b.type === 5) { avatar.boostTimer = BOOST_DURATION; playAudio('boost'); }
+                        else if (b.type === 6) { avatar.vy = SUPER_JUMP_FORCE; avatar.grounded = false; playAudio('boost'); }
+                        else if (b.type === 7) { 
+                            avatar.z += WARP_FORWARD_DISTANCE; avatar.y += WARP_ALTITUDE_BOOST; 
+                            avatar.grounded = false; playAudio('warp'); 
+                        }
+                    }
+                }
+
+                // Finish Check
+                if (avatar.z >= 355 * VOXEL_SIZE) winGame();
+
+                // Particles
+                particleTimer -= dt;
+                if (particleTimer <= 0) {
+                    particleTimer = 0.05;
+                    particles.push({
+                        x: avatar.x + (Math.random()-0.5)*0.5, y: avatar.y + 0.2, z: avatar.z,
+                        vx: avatar.vx * 0.2 + (Math.random()-0.5)*2, vy: Math.random()*2, vz: avatar.vz * 0.5,
+                        life: 0.6, maxLife: 0.6,
+                        color: !avatar.grounded ? COLOR_NEON_AMBER : (avatar.boostTimer > 0 ? COLOR_NEON_MAGENTA : COLOR_NEON_CYAN)
+                    });
+                }
+            }
+
+            // Audio Modulation
+            if (state === 'SLIDING' && avatar.grounded && glideFilter) {
+                let f = 400 + (avatar.vz / MAX_SLIDE_SPEED) * 1400;
+                glideFilter.frequency.setTargetAtTime(f, audioCtx.currentTime, 0.1);
+                glideGain.gain.setTargetAtTime(0.1, audioCtx.currentTime, 0.1);
+            } else if (glideGain) {
+                glideGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.1);
+            }
+
+            // Render Updates
+            avatarGroup.position.set(avatar.x, avatar.y, avatar.z);
+            let targetBank = - (avatar.vx / 14.0) * 0.5;
+            body.rotation.z += (targetBank - body.rotation.z) * CAMERA_LERP;
+
+            // Camera Tracking
+            let current_slope = (Math.floor(avatar.z / VOXEL_SIZE) < LEVEL_CONFIG.total_rows) ? LEVEL_CONFIG.slope_profile[Math.floor(avatar.z / VOXEL_SIZE)] : 0;
+            let target_height = 4.0 + (-current_slope * 2.0);
+            if (target_height > 4.6) target_height = 4.6; if (target_height < 3.6) target_height = 3.6;
+            
+            let target_distance = 5.0 + (-current_slope * 2.5);
+            if (target_distance > 5.5) target_distance = 5.5; if (target_distance < 4.8) target_distance = 4.8;
+            
+            let cam_target_x = avatar.x;
+            let cam_target_y = avatar.y + target_height;
+            let cam_target_z = avatar.z - target_distance;
+
+            camera.position.x += (cam_target_x - camera.position.x) * CAMERA_LERP;
+            camera.position.y += (cam_target_y - camera.position.y) * CAMERA_LERP;
+            camera.position.z += (cam_target_z - camera.position.z) * CAMERA_LERP;
+            camera.lookAt(avatar.x, avatar.y + 0.35, avatar.z + 1.5);
+
+            dLight.position.set(avatar.x + 10, avatar.y + 20, avatar.z - 10);
+            dLight.target.position.set(avatar.x, avatar.y, avatar.z);
+            dLight.target.updateMatrixWorld();
+
+            // Chunk Visibility & Cube Rotation
+            for (let c = 0; c < NUM_CHUNKS; c++) {
+                let chunk = chunks[c];
+                let isVisible = (chunk.endZ >= avatar.z - ACTIVE_WINDOW_BACK) && (chunk.startZ <= avatar.z + ACTIVE_WINDOW_FRONT);
+                chunk.group.visible = isVisible;
+            }
+
+            for (let b of global_bonus_items) {
+                if (b.picked) continue;
+                let chunk = chunks[b.chunk];
+                if (!chunk.group.visible) continue;
+                let mesh = chunk.meshes[b.type];
+                if (mesh) {
+                    let hoverY = b.baseY + Math.sin(timeNow * 0.003 + b.z) * 0.1;
+                    dummy.position.set(b.x, hoverY, b.z);
+                    dummy.rotation.set(timeNow * 0.001, timeNow * 0.0015, 0);
+                    dummy.scale.set(1, 1, 1);
+                    dummy.updateMatrix();
+                    mesh.setMatrixAt(b.index, dummy.matrix);
+                    mesh.instanceMatrix.needsUpdate = true;
+                }
+            }
+
+            // Particles Rendering
+            let pIdx = 0;
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.life -= dt;
+                if (p.life <= 0 || pIdx >= 300) { particles.splice(i, 1); continue; }
+                p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+                let s = p.life / p.maxLife;
+                dummy.position.set(p.x, p.y, p.z); dummy.scale.set(s, s, s);
+                dummy.rotation.set(timeNow/100, timeNow/100, 0); dummy.updateMatrix();
+                particleInst.setMatrixAt(pIdx, dummy.matrix);
+                particleInst.setColorAt(pIdx, new THREE.Color(p.color));
+                pIdx++;
+            }
+            particleInst.count = pIdx;
+            particleInst.instanceMatrix.needsUpdate = true;
+            if (particleInst.instanceColor) particleInst.instanceColor.needsUpdate = true;
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        requestAnimationFrame(animate);
+    </script>
+</body>
+</html>

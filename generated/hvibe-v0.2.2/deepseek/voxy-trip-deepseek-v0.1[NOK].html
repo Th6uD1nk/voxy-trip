@@ -1,0 +1,1332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Voxy Trip — Neon Canyon Descent</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #0a0410;
+    font-family: "Courier New", ui-monospace, monospace;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+  }
+  canvas { display: block; }
+
+  #hud {
+    position: fixed; top: 14px; left: 16px; z-index: 20;
+    color: #ffaa00;
+    font-size: 26px; font-weight: bold; letter-spacing: 2px;
+    text-shadow: 0 0 10px rgba(255,170,0,0.9), 0 0 22px rgba(255,0,127,0.5);
+    pointer-events: none;
+  }
+  #hud .lbl {
+    font-size: 10px; color: #ff007f; letter-spacing: 5px;
+    display: block; margin-bottom: 2px;
+  }
+
+  #overlay {
+    position: fixed; inset: 0; z-index: 30;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    text-align: center;
+    background: radial-gradient(circle at 50% 45%, rgba(40,0,60,0.62), rgba(5,0,12,0.94));
+    color: #fff;
+  }
+  #overlay.hidden { display: none; }
+  #overlay h1 {
+    margin: 0; font-size: 58px; letter-spacing: 10px;
+    color: #00f3ff;
+    text-shadow: 0 0 18px rgba(0,243,255,0.9), 0 0 48px rgba(255,0,127,0.7);
+  }
+  #overlay .sub {
+    margin: 10px 0 30px; font-size: 13px; letter-spacing: 8px; color: #ff007f;
+  }
+  #overlayMsg {
+    font-size: 16px; letter-spacing: 3px; color: #ffaa00;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.3 } }
+  #overlayTime {
+    margin: 0 0 20px; font-size: 34px; color: #39ff14; letter-spacing: 5px;
+    text-shadow: 0 0 14px rgba(57,255,20,0.8);
+  }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+<div id="hud"><span class="lbl">TIME</span><span id="timer">00:00.00</span></div>
+
+<div id="overlay">
+  <h1>VOXY TRIP</h1>
+  <div class="sub">NEON CANYON DESCENT</div>
+  <div id="overlayTime" style="display:none">00:00.00</div>
+  <div id="overlayMsg">PRESS &uarr; &middot; TAP TO START</div>
+</div>
+
+<script>
+(function () {
+'use strict';
+
+/* ============================================================================
+   1. GLOBAL CONSTANTS
+   ============================================================================ */
+
+const VOXEL_SIZE               = 1.0;
+const GRAVITY                  = 16.0;
+const BASE_SLIDE_SPEED         = 7.0;
+const MAX_SLIDE_SPEED          = 14.0;
+const JUMP_FORCE               = 6.5;
+const SUPER_JUMP_FORCE         = 12.0;
+const BOOST_MULTIPLIER         = 1.35;
+const BOOST_DURATION           = 2.0;
+const WARP_FORWARD_DISTANCE    = 10.0;
+const WARP_ALTITUDE_BOOST      = 3.5;
+const STEER_SPEED              = 13.0;
+const STEER_DAMPING            = 0.86;
+const CAMERA_DISTANCE          = 5.5;
+const CAMERA_HEIGHT            = 4.2;
+const CAMERA_LERP              = 0.1;
+
+const COLOR_CANYON_SAND        = 0xd97736;
+const COLOR_CANYON_ROCK        = 0x8b3a1a;
+const COLOR_NEON_CYAN          = 0x00f3ff;
+const COLOR_NEON_LIME          = 0x39ff14;
+const COLOR_NEON_MAGENTA       = 0xff007f;
+const COLOR_NEON_AMBER         = 0xffaa00;
+const COLOR_AVATAR             = 0x00ffff;
+
+const TRACK_WIDTH              = 12;
+const W                        = 12;
+
+const MIN_OBSTACLE_SPACING_ROWS = 10;
+const ACTIVE_WINDOW_BACK       = 15.0;
+const ACTIVE_WINDOW_FRONT      = 85.0;
+
+const FLOOR_SURFACE_OFFSET     = 0.5;
+const BONUS_FLOAT_OFFSET       = 1.2;
+const OBSTACLE_CENTER_OFFSET   = 1.0;
+
+const COL_X_OFFSET             = (TRACK_WIDTH - 1) / 2;   // 5.5 -> col c centre x = c - 5.5
+
+/* ============================================================================
+   2. LEVEL_CONFIG — PORTABLE, ENGINE-AGNOSTIC, PURE DATA
+   ============================================================================ */
+
+const LEVEL_CONFIG = (function buildPortableLevelConfig() {
+
+  const WIDTH      = 12;
+  const TOTAL_ROWS = 360;
+
+  /* ---- 5-phase downhill slope profile (delta per row, positive = downhill) ---- */
+  const slope_profile = [
+    { phase: 1, name: 'Initiation Slope',      start_row: 0,   end_row: 69,  slope: 0.18 },
+    { phase: 2, name: 'Narrow Canyon Chasm',   start_row: 70,  end_row: 149, slope: 0.25 },
+    { phase: 3, name: 'Minefield Alley',       start_row: 150, end_row: 229, slope: 0.32 },
+    { phase: 4, name: 'The Great Abyss Leap',  start_row: 230, end_row: 289, slope: 0.30 },
+    { phase: 5, name: 'Final Downhill Sprint', start_row: 290, end_row: 359, slope: 0.45 }
+  ];
+
+  /* ---- Pre-computed ground elevation per row ---- */
+  const ground_y = [];
+  (function () {
+    let elevation = 0;
+    for (let r = 0; r < TOTAL_ROWS; r++) {
+      ground_y.push(elevation);
+      let s = slope_profile[0].slope;
+      for (let i = 0; i < slope_profile.length; i++) {
+        const p = slope_profile[i];
+        if (r >= p.start_row && r <= p.end_row) { s = p.slope; break; }
+      }
+      elevation -= s;
+    }
+    ground_y.push(elevation);          // sentinel for row === TOTAL_ROWS
+  })();
+
+  /* ---- Track horizontal bounds per row (inclusive column indices) ---- */
+  function trackBounds(r) {
+    if (r < 70) return [0, 11];
+    if (r < 86) {                                       // taper in to the chasm
+      const t = (r - 70) / 16;
+      return [Math.round(t * 3), Math.round(11 - t * 3)];
+    }
+    if (r < 150) return [3, 8];                         // 6-block wide chasm
+    if (r < 162) {                                      // taper back out
+      const t = (r - 150) / 12;
+      return [Math.round(3 - t * 3), Math.round(8 + t * 3)];
+    }
+    return [0, 11];
+  }
+
+  /* ---- The Great Abyss Leap gap ---- */
+  const GAP_START = 250;
+  const GAP_END   = 257;
+
+  /* ---- Grid: 0 pit / 1 sand / 2 ramp / 3 rock / 4 mine / 5-7 bonus / 8-9 gates ---- */
+  const grid = [];
+  for (let r = 0; r < TOTAL_ROWS; r++) {
+    const row = new Array(WIDTH).fill(0);
+    if (!(r >= GAP_START && r <= GAP_END)) {
+      const b = trackBounds(r);
+      for (let c = b[0]; c <= b[1]; c++) row[c] = 1;
+    }
+    grid.push(row);
+  }
+
+  /* ---- Phase 5 gets the distinct downhill ramp voxel ---- */
+  for (let r = 290; r < TOTAL_ROWS; r++) {
+    for (let c = 0; c < WIDTH; c++) if (grid[r][c] === 1) grid[r][c] = 2;
+  }
+
+  /* ---- Start / Finish gate markers ---- */
+  const START_GATE_ROW  = 1;
+  const FINISH_GATE_ROW = 357;
+  grid[START_GATE_ROW][5] = 8;  grid[START_GATE_ROW][6] = 8;
+  grid[FINISH_GATE_ROW][5] = 9; grid[FINISH_GATE_ROW][6] = 9;
+
+  /* ---- Obstacles: >= 10 clear rows apart, never more than 2 per row ---- */
+  const OBSTACLES = [
+    { row:  92, col: 4, id: 3 }, { row:  92, col: 7, id: 3 },
+    { row: 106, col: 5, id: 3 }, { row: 106, col: 6, id: 3 },
+    { row: 120, col: 3, id: 3 }, { row: 120, col: 8, id: 3 },
+    { row: 134, col: 4, id: 3 }, { row: 134, col: 8, id: 3 },
+    { row: 146, col: 3, id: 3 }, { row: 146, col: 5, id: 3 },
+    { row: 168, col: 2, id: 4 }, { row: 168, col: 9, id: 4 },
+    { row: 182, col: 5, id: 4 }, { row: 182, col: 6, id: 4 },
+    { row: 196, col: 3, id: 4 }, { row: 196, col: 8, id: 4 },
+    { row: 210, col: 1, id: 4 }, { row: 210, col: 10, id: 4 },
+    { row: 224, col: 4, id: 4 }, { row: 224, col: 7, id: 4 },
+    { row: 306, col: 5, id: 3 }, { row: 306, col: 6, id: 3 },
+    { row: 326, col: 2, id: 3 }, { row: 326, col: 9, id: 3 },
+    { row: 346, col: 4, id: 3 }, { row: 346, col: 7, id: 3 }
+  ];
+  for (let i = 0; i < OBSTACLES.length; i++) {
+    const o = OBSTACLES[i];
+    if (grid[o.row] && grid[o.row][o.col] !== 0) grid[o.row][o.col] = o.id;
+  }
+
+  /* ---- Bonus cubes ---- */
+  const BONUSES = [
+    { row:  40, col: 5, id: 5 },
+    { row:  58, col: 7, id: 5 },
+    { row:  78, col: 6, id: 5 },
+    { row: 113, col: 4, id: 6 },
+    { row: 128, col: 7, id: 5 },
+    { row: 175, col: 5, id: 5 },
+    { row: 189, col: 8, id: 5 },
+    { row: 203, col: 3, id: 5 },
+    { row: 217, col: 6, id: 5 },
+    { row: 240, col: 6, id: 6 },
+    { row: 248, col: 4, id: 7 },
+    { row: 248, col: 5, id: 7 },
+    { row: 248, col: 6, id: 7 },
+    { row: 298, col: 5, id: 6 },
+    { row: 318, col: 6, id: 6 },
+    { row: 338, col: 5, id: 6 },
+    { row: 352, col: 6, id: 5 }
+  ];
+  for (let i = 0; i < BONUSES.length; i++) {
+    const b = BONUSES[i];
+    if (grid[b.row] && grid[b.row][b.col] !== 0) grid[b.row][b.col] = b.id;
+  }
+
+  return {
+    name: 'Neon Canyon Descent',
+    width: WIDTH,
+    total_rows: TOTAL_ROWS,
+    slope_profile: slope_profile,
+    ground_y: ground_y,
+    grid: grid,
+    trackBounds: trackBounds,
+    gap_start: GAP_START,
+    gap_end: GAP_END,
+    start_gate_row: START_GATE_ROW,
+    finish_gate_row: FINISH_GATE_ROW
+  };
+})();
+
+const TOTAL_ROWS = LEVEL_CONFIG.total_rows;
+
+function getGroundY(r) {
+  if (r < 0) r = 0;
+  if (r > TOTAL_ROWS) r = TOTAL_ROWS;
+  return LEVEL_CONFIG.ground_y[r];
+}
+function tileAt(r, c) {
+  if (r < 0 || r >= TOTAL_ROWS) return 0;
+  if (c < 0 || c >= LEVEL_CONFIG.width) return 0;
+  return LEVEL_CONFIG.grid[r][c];
+}
+function boundsAt(r) {
+  if (r < 0) r = 0;
+  if (r >= TOTAL_ROWS) r = TOTAL_ROWS - 1;
+  return LEVEL_CONFIG.trackBounds(r);
+}
+
+/* ============================================================================
+   3. THREE.JS BOOTSTRAP
+   ============================================================================ */
+
+const scene = new THREE.Scene();
+scene.background = (function makeSkyGradient() {
+  const cv = document.createElement('canvas');
+  cv.width = 4; cv.height = 256;
+  const g = cv.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0.00, '#0b0020');
+  grad.addColorStop(0.38, '#3d0a53');
+  grad.addColorStop(0.62, '#a8165b');
+  grad.addColorStop(0.80, '#ff7a35');
+  grad.addColorStop(1.00, '#ffd79a');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 4, 256);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  return tex;
+})();
+scene.fog = new THREE.Fog(0x3a1140, 45, 150);
+
+const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 420);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+/* ---- Lighting ---- */
+const hemiLight = new THREE.HemisphereLight(0xff9a5c, 0x2a0f3a, 0.62);
+scene.add(hemiLight);
+
+const ambientLight = new THREE.AmbientLight(0x552266, 0.45);
+scene.add(ambientLight);
+
+const sunLight = new THREE.DirectionalLight(0xffb070, 1.15);
+sunLight.position.set(-24, 38, -18);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.width  = 1024;   // hard shadow-map budget
+sunLight.shadow.mapSize.height = 1024;
+sunLight.shadow.camera.near = 1;
+sunLight.shadow.camera.far  = 140;
+sunLight.shadow.camera.left   = -20;
+sunLight.shadow.camera.right  =  20;
+sunLight.shadow.camera.top    =  20;
+sunLight.shadow.camera.bottom = -20;
+sunLight.shadow.bias = -0.0012;
+scene.add(sunLight);
+scene.add(sunLight.target);
+
+/* ============================================================================
+   4. SHARED GEOMETRY / MATERIALS
+   ============================================================================ */
+
+const BOX     = new THREE.BoxGeometry(1, 1, 1);
+const BOX_BON = new THREE.BoxGeometry(0.8, 0.8, 0.8);
+const BOX_PAR = new THREE.BoxGeometry(0.22, 0.22, 0.22);
+const DUMMY   = new THREE.Object3D();
+
+/* Track bed: dark sandstone. */
+const MAT_FLOOR_A = new THREE.MeshLambertMaterial({ color: 0x4a3226 });
+/* Downhill ramp voxel — slightly warmer/lighter. */
+const MAT_FLOOR_B = new THREE.MeshLambertMaterial({ color: 0x5f402c });
+/* Neon-cyan side guardrails (bright, NON-emissive — emissive strictly reserved for bonuses). */
+const MAT_RAIL    = new THREE.MeshLambertMaterial({ color: 0x00d8e8 });
+/* Stepped canyon cliffs: warm terracotta + rust-red. */
+const MAT_WALL_A  = new THREE.MeshLambertMaterial({ color: 0xd97736 });
+const MAT_WALL_B  = new THREE.MeshLambertMaterial({ color: 0x8b3a1a });
+/* Hazards — strictly matte, strictly non-emissive. */
+const MAT_ROCK    = new THREE.MeshLambertMaterial({ color: 0x8b3a1a });
+const MAT_MINE    = new THREE.MeshLambertMaterial({ color: 0x221111 });
+/* Bonus cubes — the ONLY emissive materials in the entire scene. */
+const MAT_BOOST_SPEED = new THREE.MeshLambertMaterial({ color: COLOR_NEON_CYAN,    emissive: COLOR_NEON_CYAN,    emissiveIntensity: 0.95 });
+const MAT_BOOST_JUMP  = new THREE.MeshLambertMaterial({ color: COLOR_NEON_LIME,    emissive: COLOR_NEON_LIME,    emissiveIntensity: 0.95 });
+const MAT_BOOST_WARP  = new THREE.MeshLambertMaterial({ color: COLOR_NEON_MAGENTA, emissive: COLOR_NEON_MAGENTA, emissiveIntensity: 0.95 });
+
+/* ============================================================================
+   5. WORLD BUILD — CHUNKED INSTANCED VOXELS
+   ============================================================================ */
+
+const CHUNK_ROWS = 40;
+
+function makeInstanced(flatArray, material, castShadow, receiveShadow) {
+  const count = flatArray.length / 3;
+  if (count === 0) return null;
+  const mesh = new THREE.InstancedMesh(BOX, material, count);
+  for (let i = 0; i < count; i++) {
+    DUMMY.position.set(flatArray[i * 3], flatArray[i * 3 + 1], flatArray[i * 3 + 2]);
+    DUMMY.rotation.set(0, 0, 0);
+    DUMMY.scale.set(1, 1, 1);
+    DUMMY.updateMatrix();
+    mesh.setMatrixAt(i, DUMMY.matrix);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  /* MANDATED: never let Three.js r128 auto-cull an InstancedMesh by its origin-centred base sphere. */
+  mesh.frustumCulled = false;
+  mesh.castShadow = castShadow;
+  mesh.receiveShadow = receiveShadow;
+  scene.add(mesh);
+  return mesh;
+}
+
+const chunks = [];   // { zMin, zMax, meshes: [] }
+
+(function buildAllChunks() {
+  const nChunks = Math.ceil(TOTAL_ROWS / CHUNK_ROWS);
+
+  for (let ci = 0; ci < nChunks; ci++) {
+    const r0 = ci * CHUNK_ROWS;
+    const r1 = Math.min(r0 + CHUNK_ROWS, TOTAL_ROWS);
+
+    const floorA = [], floorB = [], rail = [], wallA = [], wallB = [], rock = [], mine = [];
+
+    for (let r = r0; r < r1; r++) {
+      const b  = boundsAt(r);
+      const gy = getGroundY(r);
+      const steep = (r >= 290);
+
+      for (let c = 0; c < LEVEL_CONFIG.width; c++) {
+        const t = tileAt(r, c);
+        if (t === 0) continue;
+
+        const x = c - COL_X_OFFSET;
+
+        /* floor voxel beneath every non-void cell */
+        (steep ? floorB : floorA).push(x, gy + FLOOR_SURFACE_OFFSET, r);
+
+        /* entity voxel resting on the floor */
+        if (t === 3)      rock.push(x, gy + OBSTACLE_CENTER_OFFSET, r);
+        else if (t === 4) mine.push(x, gy + OBSTACLE_CENTER_OFFSET, r);
+      }
+
+      /* Neon-cyan side guardrail blocks on the track edges (skipped across the abyss gap) */
+      if (tileAt(r, b[0]) !== 0) rail.push(b[0] - COL_X_OFFSET, gy + 1.0, r);
+      if (b[1] !== b[0] && tileAt(r, b[1]) !== 0) rail.push(b[1] - COL_X_OFFSET, gy + 1.0, r);
+
+      /* Stepped canyon cliff voxels outside the track (decorative, never casting shadows) */
+      for (let k = 1; k <= 3; k++) {
+        const h = 4 - k;                       // 3, 2, 1
+        const cl = b[0] - k;
+        const cr = b[1] + k;
+        const side = ((r + k) % 2 === 0) ? wallA : wallB;
+        for (let yy = 0; yy < h; yy++) {
+          side.push(cl - COL_X_OFFSET, gy + FLOOR_SURFACE_OFFSET + yy, r);
+          side.push(cr - COL_X_OFFSET, gy + FLOOR_SURFACE_OFFSET + yy, r);
+        }
+      }
+    }
+
+    const meshes = [];
+    const mFloorA = makeInstanced(floorA, MAT_FLOOR_A, false, true);
+    const mFloorB = makeInstanced(floorB, MAT_FLOOR_B, false, true);
+    const mRail   = makeInstanced(rail,   MAT_RAIL,    false, false);
+    const mWallA  = makeInstanced(wallA,  MAT_WALL_A,  false, false);
+    const mWallB  = makeInstanced(wallB,  MAT_WALL_B,  false, false);
+    const mRock   = makeInstanced(rock,   MAT_ROCK,    true,  true);
+    const mMine   = makeInstanced(mine,   MAT_MINE,    true,  true);
+
+    [mFloorA, mFloorB, mRail, mWallA, mWallB, mRock, mMine].forEach(function (m) {
+      if (m) meshes.push(m);
+    });
+
+    chunks.push({
+      zMin: r0 - 0.5,
+      zMax: r1 - 0.5,
+      meshes: meshes
+    });
+  }
+})();
+
+/* ---- Gates (only two, built as simple cubic arches) ---- */
+(function buildGates() {
+  const defs = [
+    { row: LEVEL_CONFIG.start_gate_row,  color: COLOR_NEON_AMBER },
+    { row: LEVEL_CONFIG.finish_gate_row, color: COLOR_NEON_MAGENTA }
+  ];
+  for (let i = 0; i < defs.length; i++) {
+    const d  = defs[i];
+    const gy = getGroundY(d.row);
+    const mat = new THREE.MeshLambertMaterial({ color: d.color });
+    const grp = new THREE.Group();
+    const pillarCols = [3, 8];
+    for (let p = 0; p < pillarCols.length; p++) {
+      for (let h = 0; h < 3; h++) {
+        const m = new THREE.Mesh(BOX, mat);
+        m.position.set(pillarCols[p] - COL_X_OFFSET, gy + FLOOR_SURFACE_OFFSET + h, d.row);
+        grp.add(m);
+      }
+    }
+    for (let c = 4; c <= 7; c++) {
+      const m = new THREE.Mesh(BOX, mat);
+      m.position.set(c - COL_X_OFFSET, gy + 3.5, d.row);
+      grp.add(m);
+    }
+    scene.add(grp);
+  }
+})();
+
+/* ============================================================================
+   6. BONUS CUBES — GLOBAL INSTANCED, INDIVIDUALLY ROTATED
+   ============================================================================ */
+
+const bonusGroups = [];      // index 0 -> id 5, 1 -> id 6, 2 -> id 7
+const allBonusCubes = [];
+
+(function buildBonusCubes() {
+  const mats  = [MAT_BOOST_SPEED, MAT_BOOST_JUMP, MAT_BOOST_WARP];
+  const ids   = [5, 6, 7];
+
+  for (let g = 0; g < 3; g++) {
+    const id = ids[g];
+    const cubes = [];
+
+    for (let r = 0; r < TOTAL_ROWS; r++) {
+      for (let c = 0; c < LEVEL_CONFIG.width; c++) {
+        if (tileAt(r, c) === id) {
+          cubes.push({
+            id: id,
+            row: r,
+            col: c,
+            x: c - COL_X_OFFSET,
+            y: getGroundY(r) + BONUS_FLOAT_OFFSET,
+            z: r,
+            phase: (r * 0.37 + c * 1.13),
+            collected: false,
+            index: cubes.length
+          });
+        }
+      }
+    }
+
+    const mesh = new THREE.InstancedMesh(BOX_BON, mats[g], Math.max(cubes.length, 1));
+    mesh.frustumCulled = false;                       // MANDATED
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+    for (let i = 0; i < cubes.length; i++) {
+      const cb = cubes[i];
+      DUMMY.position.set(cb.x, cb.y, cb.z);
+      DUMMY.rotation.set(0, 0, 0);
+      DUMMY.scale.set(1, 1, 1);
+      DUMMY.updateMatrix();
+      mesh.setMatrixAt(i, DUMMY.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.count = cubes.length;
+    scene.add(mesh);
+
+    bonusGroups.push({ id: id, mesh: mesh, cubes: cubes });
+    for (let i = 0; i < cubes.length; i++) allBonusCubes.push(cubes[i]);
+  }
+})();
+
+/* Bonus cubes rotate on their OWN local centre axis — never the parent. */
+function updateBonusVisuals(t) {
+  const back  = avatar.z - ACTIVE_WINDOW_BACK;
+  const front = avatar.z + ACTIVE_WINDOW_FRONT;
+
+  for (let g = 0; g < bonusGroups.length; g++) {
+    const grp = bonusGroups[g];
+    let touched = false;
+
+    for (let i = 0; i < grp.cubes.length; i++) {
+      const cb = grp.cubes[i];
+
+      if (cb.collected) {
+        DUMMY.position.set(cb.x, cb.y, cb.z);
+        DUMMY.rotation.set(0, 0, 0);
+        DUMMY.scale.setScalar(0.0001);
+      } else if (cb.z >= back - 2 && cb.z <= front + 2) {
+        /* LOCAL instance matrix rotation around the cube's own centre axis. */
+        DUMMY.position.set(cb.x, cb.y + Math.sin(t * 2.0 + cb.phase) * 0.12, cb.z);
+        DUMMY.rotation.set(t * 0.85 + cb.phase, t * 1.25 + cb.phase, t * 0.45);
+        DUMMY.scale.set(1, 1, 1);
+      } else {
+        continue;                                   // outside active window -> skip update
+      }
+
+      DUMMY.updateMatrix();
+      grp.mesh.setMatrixAt(cb.index, DUMMY.matrix);
+      touched = true;
+    }
+
+    if (touched) grp.mesh.instanceMatrix.needsUpdate = true;
+  }
+}
+
+/* ============================================================================
+   7. AVATAR — CUBIC VOXEL SLIDER
+   ============================================================================ */
+
+const avatarGroup = new THREE.Group();
+scene.add(avatarGroup);
+
+(function buildAvatarMesh() {
+  const matBody  = new THREE.MeshLambertMaterial({ color: COLOR_AVATAR });
+  const matVisor = new THREE.MeshLambertMaterial({ color: 0xfff2b0 });
+  const matBase  = new THREE.MeshLambertMaterial({ color: 0x0a5f6b });
+
+  const base = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.15, 0.95), matBase);
+  base.position.set(0, 0.075, 0);
+  base.castShadow = true;
+  avatarGroup.add(base);
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.8), matBody);
+  body.position.set(0, 0.575, 0);
+  body.castShadow = true;
+  avatarGroup.add(body);
+
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.18, 0.1), matVisor);
+  visor.position.set(0, 0.70, 0.41);
+  avatarGroup.add(visor);
+})();
+
+/* ============================================================================
+   8. CUBIC PARTICLE TRAIL — 4 COLOUR POOLS
+   ============================================================================ */
+
+const PARTICLE_POOL_SIZE = 90;
+const POOL_COLORS = [0x00f3ff, 0xff007f, 0x39ff14, 0xffaa00];  // cyan / magenta / lime / amber
+const pools = [];
+for (let i = 0; i < POOL_COLORS.length; i++) {
+  const mesh = new THREE.InstancedMesh(
+    BOX_PAR,
+    new THREE.MeshBasicMaterial({ color: POOL_COLORS[i] }),
+    PARTICLE_POOL_SIZE
+  );
+  mesh.frustumCulled = false;
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.count = 0;
+  scene.add(mesh);
+  pools.push({ mesh: mesh });
+}
+
+const particles = [];
+const PARTICLE_LIFE = 0.6;
+
+function trailColorIndex() {
+  if (boostTimer > 0)  return 1;   // magenta — speed boost
+  if (warpFlash > 0)   return 2;   // lime — warp
+  if (!avatar.grounded) return 3;  // amber — airborne
+  return 0;                        // cyan — normal slide
+}
+
+function spawnParticle() {
+  if (particles.length > 340) particles.shift();
+  particles.push({
+    x: avatar.x + (Math.random() - 0.5) * 0.42,
+    y: avatar.y + 0.12 + Math.random() * 0.24,
+    z: avatar.z - 0.38,
+    vx: -avatar.vx * 0.25 + (Math.random() - 0.5) * 1.3,
+    vy: 0.55 + Math.random() * 1.0,
+    vz: -avatar.speed * 0.22,
+    life: PARTICLE_LIFE,
+    maxLife: PARTICLE_LIFE,
+    ci: trailColorIndex()
+  });
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    p.vy -= 6.0 * dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.z += p.vz * dt;
+  }
+
+  const counts = [0, 0, 0, 0];
+
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+    const idx = counts[p.ci];
+    if (idx >= PARTICLE_POOL_SIZE) continue;
+    counts[p.ci]++;
+
+    const k = p.life / p.maxLife;
+    DUMMY.position.set(p.x, p.y, p.z);
+    DUMMY.rotation.set(p.life * 6.0, p.life * 5.0, p.life * 4.0);
+    DUMMY.scale.setScalar(Math.max(0.05, k));
+    DUMMY.updateMatrix();
+    pools[p.ci].mesh.setMatrixAt(idx, DUMMY.matrix);
+  }
+
+  for (let i = 0; i < 4; i++) {
+    pools[i].mesh.count = counts[i];
+    pools[i].mesh.instanceMatrix.needsUpdate = true;
+  }
+}
+
+function spawnMineDebris(x, y, z) {
+  for (let i = 0; i < 46; i++) {
+    if (particles.length > 340) particles.shift();
+    const a = Math.random() * Math.PI * 2;
+    const s = 3.0 + Math.random() * 6.5;
+    particles.push({
+      x: x + (Math.random() - 0.5) * 0.5,
+      y: y + (Math.random() - 0.5) * 0.5,
+      z: z + (Math.random() - 0.5) * 0.5,
+      vx: Math.cos(a) * s,
+      vy: 2.5 + Math.random() * 6.0,
+      vz: Math.sin(a) * s,
+      life: 0.9,
+      maxLife: 0.9,
+      ci: 3
+    });
+  }
+}
+
+/* ============================================================================
+   9. PROCEDURAL WEB AUDIO SYNTHESIZER
+   ============================================================================ */
+
+let actx = null;
+let masterGain = null;
+let noiseBuffer = null;
+let windFilter = null;
+let windGain = null;
+
+function ensureAudio() {
+  if (actx) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+
+  actx = new AC();
+
+  masterGain = actx.createGain();
+  masterGain.gain.value = 0.5;
+  masterGain.connect(actx.destination);
+
+  /* White-noise buffer — the only raw material used by the synth. */
+  const len = Math.floor(actx.sampleRate * 2);
+  noiseBuffer = actx.createBuffer(1, len, actx.sampleRate);
+  const d = noiseBuffer.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+
+  /* Glide / wind loop: noise -> bandpass -> gain */
+  const src = actx.createBufferSource();
+  src.buffer = noiseBuffer;
+  src.loop = true;
+
+  windFilter = actx.createBiquadFilter();
+  windFilter.type = 'bandpass';
+  windFilter.frequency.value = 500;
+  windFilter.Q.value = 0.9;
+
+  windGain = actx.createGain();
+  windGain.gain.value = 0.0;
+
+  src.connect(windFilter);
+  windFilter.connect(windGain);
+  windGain.connect(masterGain);
+  src.start();
+}
+
+function setWind(speed, active) {
+  if (!actx || !windFilter || !windGain) return;
+  const t = actx.currentTime;
+  const s = Math.min(speed / MAX_SLIDE_SPEED, 1);
+  windFilter.frequency.setTargetAtTime(400 + s * 1400, t, 0.08);   // 400 Hz -> 1800 Hz
+  windGain.gain.setTargetAtTime(active ? (0.10 + s * 0.11) : 0.0, t, 0.09);
+}
+
+function playJumpSound() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const osc = actx.createOscillator();
+  const g   = actx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(200, t);
+  osc.frequency.exponentialRampToValueAtTime(650, t + 0.12);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.34, t + 0.008);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+  osc.connect(g); g.connect(masterGain);
+  osc.start(t); osc.stop(t + 0.14);
+}
+
+function playBoostSound() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const freqs = [440, 880];
+  for (let i = 0; i < freqs.length; i++) {
+    const osc = actx.createOscillator();
+    const g   = actx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.value = freqs[i];
+    const st = t + i * 0.10;
+    g.gain.setValueAtTime(0.0001, st);
+    g.gain.exponentialRampToValueAtTime(0.30, st + 0.010);
+    g.gain.exponentialRampToValueAtTime(0.0001, st + 0.25);
+    osc.connect(g); g.connect(masterGain);
+    osc.start(st); osc.stop(st + 0.27);
+  }
+}
+
+function playWarpSound() {
+  if (!actx) return;
+  const t   = actx.currentTime;
+  const osc = actx.createOscillator();
+  const lfo = actx.createOscillator();
+  const lfoGain = actx.createGain();
+  const g   = actx.createGain();
+
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(800, t);
+  osc.frequency.exponentialRampToValueAtTime(200, t + 0.45);
+
+  lfo.type = 'sine';
+  lfo.frequency.value = 22;
+  lfoGain.gain.value = 90;
+  lfo.connect(lfoGain);
+  lfoGain.connect(osc.frequency);
+
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.26, t + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.50);
+
+  osc.connect(g); g.connect(masterGain);
+  osc.start(t); lfo.start(t);
+  osc.stop(t + 0.52); lfo.stop(t + 0.52);
+}
+
+function playExplosionSound() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const src = actx.createBufferSource();
+  src.buffer = noiseBuffer;
+  const lp = actx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(900, t);
+  lp.frequency.exponentialRampToValueAtTime(80, t + 0.40);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.65, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.40);
+  src.connect(lp); lp.connect(g); g.connect(masterGain);
+  src.start(t); src.stop(t + 0.45);
+}
+
+function playVictorySound() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const notes = [523.25, 659.25, 783.99, 1046.50];   // C5 E5 G5 C6
+  for (let i = 0; i < notes.length; i++) {
+    const osc = actx.createOscillator();
+    const lp  = actx.createBiquadFilter();
+    const g   = actx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = notes[i];
+    lp.type = 'lowpass';
+    lp.frequency.value = 2200;
+    const st = t + i * 0.16;
+    g.gain.setValueAtTime(0.0001, st);
+    g.gain.exponentialRampToValueAtTime(0.22, st + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, st + 0.42);
+    osc.connect(lp); lp.connect(g); g.connect(masterGain);
+    osc.start(st); osc.stop(st + 0.45);
+  }
+}
+
+/* ============================================================================
+   10. GAME STATE
+   ============================================================================ */
+
+const STATE = { READY: 'READY', SLIDING: 'SLIDING', CRASHED: 'CRASHED', CLEARED: 'CLEARED' };
+
+let state = STATE.READY;
+
+const avatar = {
+  x: 0, y: 0, z: 0,
+  vx: 0, vy: 0,
+  speed: BASE_SLIDE_SPEED,
+  grounded: true
+};
+
+let boostTimer = 0;
+let warpFlash  = 0;
+let elapsed    = 0;
+let emitAccum  = 0;
+let jumpRequested = false;
+
+const camOffset = new THREE.Vector3(0, CAMERA_HEIGHT, -CAMERA_DISTANCE);
+
+const keyInput   = { left: false, right: false };
+const touchInput = { left: false, right: false };
+
+const hudTimer   = document.getElementById('timer');
+const overlay    = document.getElementById('overlay');
+const overlayMsg = document.getElementById('overlayMsg');
+const overlayTimeEl = document.getElementById('overlayTime');
+
+function formatTime(t) {
+  if (t < 0) t = 0;
+  const m = Math.floor(t / 60);
+  const s = Math.floor(t % 60);
+  const c = Math.floor((t * 100) % 100);
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0') + '.' + String(c).padStart(2, '0');
+}
+
+function resetGame() {
+  avatar.x = 0;
+  avatar.z = 0;
+  avatar.vx = 0;
+  avatar.vy = 0;
+  avatar.speed = BASE_SLIDE_SPEED;
+  avatar.grounded = true;
+  avatar.y = getGroundY(0) + FLOOR_SURFACE_OFFSET;
+
+  boostTimer = 0;
+  warpFlash  = 0;
+  elapsed    = 0;
+  emitAccum  = 0;
+  jumpRequested = false;
+
+  particles.length = 0;
+  for (let i = 0; i < 4; i++) {
+    pools[i].mesh.count = 0;
+    pools[i].mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  for (let i = 0; i < allBonusCubes.length; i++) allBonusCubes[i].collected = false;
+
+  keyInput.left = false; keyInput.right = false;
+  touchInput.left = false; touchInput.right = false;
+  activeTouches.clear();
+
+  camOffset.set(0, CAMERA_HEIGHT, -CAMERA_DISTANCE);
+  camera.position.set(avatar.x, avatar.y + CAMERA_HEIGHT, avatar.z - CAMERA_DISTANCE);
+  camera.lookAt(avatar.x, avatar.y + 0.35, avatar.z + 1.5);
+
+  avatarGroup.position.set(avatar.x, avatar.y, avatar.z);
+  avatarGroup.rotation.set(0, 0, 0);
+
+  hudTimer.textContent = '00:00.00';
+  updateChunkVisibility();
+  updateBonusVisuals(0);
+}
+
+function startOrRestart() {
+  ensureAudio();
+  if (actx && actx.state === 'suspended') actx.resume();
+  resetGame();
+  state = STATE.SLIDING;
+  overlay.classList.add('hidden');
+  jumpRequested = false;
+}
+
+function triggerCrash(explode) {
+  if (state !== STATE.SLIDING) return;
+  state = STATE.CRASHED;
+  setWind(0, false);
+  if (explode) {
+    spawnMineDebris(avatar.x, avatar.y + 0.5, avatar.z);
+    playExplosionSound();
+  } else {
+    playExplosionSound();
+  }
+  overlayTimeEl.textContent = formatTime(elapsed);
+  overlayTimeEl.style.display = 'block';
+  overlayMsg.textContent = 'CRASHED — PRESS ↑ · TAP TO RETRY';
+  overlay.classList.remove('hidden');
+}
+
+function triggerClear() {
+  if (state !== STATE.SLIDING) return;
+  state = STATE.CLEARED;
+  setWind(0, false);
+  playVictorySound();
+  overlayTimeEl.textContent = formatTime(elapsed);
+  overlayTimeEl.style.display = 'block';
+  overlayMsg.textContent = 'STAGE CLEARED — PRESS ↑ · TAP TO RUN AGAIN';
+  overlay.classList.remove('hidden');
+}
+
+/* ============================================================================
+   11. INPUT — STRICT 3-ARROW KEYBOARD + TWO-ZONE TOUCH
+   ============================================================================ */
+
+function isBoundKey(code) {
+  return code === 'ArrowLeft' || code === 'ArrowRight' || code === 'ArrowUp';
+}
+
+window.addEventListener('keydown', function (e) {
+  if (!isBoundKey(e.code)) return;           // strict: never bind any other key
+  e.preventDefault();
+
+  if (e.code === 'ArrowLeft') {
+    keyInput.left = true;
+    return;
+  }
+  if (e.code === 'ArrowRight') {
+    keyInput.right = true;
+    return;
+  }
+  /* ArrowUp */
+  if (e.repeat) return;                      // ignore OS auto-repeat entirely
+  if (state === STATE.SLIDING) {
+    jumpRequested = true;
+  } else {
+    /* READY / CRASHED / CLEARED -> start or restart, with NO frame-0 jump impulse. */
+    startOrRestart();
+  }
+}, { passive: false });
+
+window.addEventListener('keyup', function (e) {
+  if (e.code === 'ArrowLeft')  { keyInput.left = false; e.preventDefault(); return; }
+  if (e.code === 'ArrowRight') { keyInput.right = false; e.preventDefault(); return; }
+  if (e.code === 'ArrowUp')    { e.preventDefault(); }
+}, { passive: false });
+
+/* ---- Touch ---- */
+const activeTouches = new Map();   // identifier -> { side, startY, jumped }
+
+function recomputeTouchInput() {
+  let l = false, r = false;
+  activeTouches.forEach(function (rec) {
+    if (rec.side === 'left')  l = true;
+    if (rec.side === 'right') r = true;
+  });
+  touchInput.left = l;
+  touchInput.right = r;
+}
+
+function onTouchStart(e) {
+  e.preventDefault();
+  ensureAudio();
+  if (actx && actx.state === 'suspended') actx.resume();
+
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+
+    if (state !== STATE.SLIDING) {
+      activeTouches.set(t.identifier, { side: 'none', startY: t.clientY, jumped: true });
+      startOrRestart();
+      continue;
+    }
+
+    const side = (t.clientX < window.innerWidth / 2) ? 'left' : 'right';
+    activeTouches.set(t.identifier, { side: side, startY: t.clientY, jumped: false });
+
+    if (activeTouches.size >= 2) jumpRequested = true;   // dual-touch jump
+  }
+  recomputeTouchInput();
+}
+
+function onTouchMove(e) {
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    const rec = activeTouches.get(t.identifier);
+    if (!rec) continue;
+    if (!rec.jumped && (rec.startY - t.clientY) > 45) {
+      rec.jumped = true;
+      if (state === STATE.SLIDING) jumpRequested = true;   // upward swipe jump
+    }
+  }
+}
+
+function onTouchEnd(e) {
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    activeTouches.delete(e.changedTouches[i].identifier);
+  }
+  recomputeTouchInput();
+}
+
+window.addEventListener('touchstart',  onTouchStart, { passive: false });
+window.addEventListener('touchmove',   onTouchMove,  { passive: false });
+window.addEventListener('touchend',    onTouchEnd,   { passive: false });
+window.addEventListener('touchcancel', onTouchEnd,   { passive: false });
+
+/* ---- Pointer fallback (mouse "tap") — start / restart only ---- */
+window.addEventListener('mousedown', function () {
+  ensureAudio();
+  if (actx && actx.state === 'suspended') actx.resume();
+  if (state !== STATE.SLIDING) startOrRestart();
+});
+
+/* ============================================================================
+   12. CHUNK VISIBILITY (software active-Z-windowing)
+   ============================================================================ */
+
+function updateChunkVisibility() {
+  const back  = avatar.z - ACTIVE_WINDOW_BACK;
+  const front = avatar.z + ACTIVE_WINDOW_FRONT;
+  for (let i = 0; i < chunks.length; i++) {
+    const ch = chunks[i];
+    const vis = (ch.zMax >= back) && (ch.zMin <= front);
+    for (let m = 0; m < ch.meshes.length; m++) ch.meshes[m].visible = vis;
+  }
+}
+
+/* ============================================================================
+   13. PHYSICS, COLLISION & PICKUPS
+   ============================================================================ */
+
+function collectCube(cb) {
+  cb.collected = true;
+
+  if (cb.id === 5) {
+    /* SPEED BOOSTER */
+    boostTimer = BOOST_DURATION;
+    playBoostSound();
+  } else if (cb.id === 6) {
+    /* JUMP BOOSTER */
+    avatar.vy = SUPER_JUMP_FORCE;
+    avatar.grounded = false;
+    playBoostSound();
+  } else if (cb.id === 7) {
+    /* WARP TELEPORTER — strictly bounded forward leap + altitude, then gravity. */
+    avatar.z += WARP_FORWARD_DISTANCE;
+    avatar.y += WARP_ALTITUDE_BOOST;
+    avatar.grounded = false;
+    if (avatar.vy < 0) avatar.vy = 0;
+    warpFlash = 0.5;
+    playWarpSound();
+  }
+}
+
+function updateSlide(dt) {
+  /* ---------- 13a. Steering ---------- */
+  const steerL = keyInput.left  || touchInput.left;
+  const steerR = keyInput.right || touchInput.right;
+  let steer = 0;
+  if (steerL) steer -= 1;
+  if (steerR) steer += 1;
+
+  avatar.vx += steer * STEER_SPEED * dt;
+  avatar.vx *= Math.pow(STEER_DAMPING, dt * 60);
+  avatar.x  += avatar.vx * dt;
+
+  /* Lateral clamp to the navigable lane (inside the neon guardrail columns). */
+  const b = boundsAt(Math.floor(avatar.z / VOXEL_SIZE));
+  const minX = b[0] - 4.5;
+  const maxX = b[1] - 6.5;
+  if (avatar.x < minX) { avatar.x = minX; avatar.vx = 0; }
+  if (avatar.x > maxX) { avatar.x = maxX; avatar.vx = 0; }
+
+  /* ---------- 13b. Forward speed ---------- */
+  const rIdx = Math.floor(avatar.z / VOXEL_SIZE);
+  const downDrop = getGroundY(rIdx) - getGroundY(rIdx + 1);   // positive downhill delta
+
+  let targetSpeed = BASE_SLIDE_SPEED + downDrop * 15.0;
+  if (boostTimer > 0) targetSpeed *= BOOST_MULTIPLIER;
+  if (targetSpeed > MAX_SLIDE_SPEED) targetSpeed = MAX_SLIDE_SPEED;
+
+  avatar.speed += (targetSpeed - avatar.speed) * Math.min(1, dt * 4.0);
+  if (avatar.speed > MAX_SLIDE_SPEED) avatar.speed = MAX_SLIDE_SPEED;
+
+  avatar.z += avatar.speed * dt;
+
+  /* ---------- 13c. Continuous ground interpolation ---------- */
+  const rr   = Math.floor(avatar.z / VOXEL_SIZE);
+  const frac = (avatar.z / VOXEL_SIZE) - rr;
+  const col  = Math.max(0, Math.min(LEVEL_CONFIG.width - 1, Math.floor(avatar.x + 6)));
+
+  const hasF0 = tileAt(rr, col) !== 0;
+  const hasF1 = tileAt(rr + 1, col) !== 0;
+
+  let surfaceY = null;
+  if (hasF0 && hasF1) {
+    const gy = (1.0 - frac) * getGroundY(rr) + frac * getGroundY(rr + 1);
+    surfaceY = gy + FLOOR_SURFACE_OFFSET;
+  } else if (hasF0) {
+    surfaceY = getGroundY(rr) + FLOOR_SURFACE_OFFSET;
+  } else if (hasF1) {
+    surfaceY = getGroundY(rr + 1) + FLOOR_SURFACE_OFFSET;
+  }
+
+  /* ---------- 13d. Jump ---------- */
+  if (jumpRequested && avatar.grounded) {
+    avatar.vy = JUMP_FORCE;
+    avatar.grounded = false;
+    playJumpSound();
+  }
+  jumpRequested = false;
+
+  /* ---------- 13e. Vertical integration ---------- */
+  if (avatar.grounded) {
+    if (surfaceY === null) {
+      avatar.grounded = false;               // slid off an abyss pit edge
+      avatar.vy = 0;
+    } else {
+      avatar.y = surfaceY;                   // glued to the interpolated slope
+    }
+  } else {
+    avatar.vy -= GRAVITY * dt;
+    avatar.y  += avatar.vy * dt;
+    if (surfaceY !== null && avatar.y <= surfaceY && avatar.vy <= 0) {
+      avatar.y = surfaceY;
+      avatar.vy = 0;
+      avatar.grounded = true;
+    }
+  }
+
+  /* ---------- 13f. Relative void-fall failure ---------- */
+  const currentGroundY = getGroundY(Math.floor(avatar.z / VOXEL_SIZE));
+  if (avatar.y < currentGroundY - 12.0) {
+    triggerCrash(false);
+    return;
+  }
+
+  /* ---------- 13g. 3D collision + pickup sweep ---------- */
+  const aRow = Math.round(avatar.z);
+  const aCol = Math.max(0, Math.min(LEVEL_CONFIG.width - 1, Math.floor(avatar.x + 6)));
+
+  for (let r2 = aRow - 1; r2 <= aRow + 1; r2++) {
+    if (r2 < 0 || r2 >= TOTAL_ROWS) continue;
+    for (let c2 = aCol - 1; c2 <= aCol + 1; c2++) {
+      if (c2 < 0 || c2 >= LEVEL_CONFIG.width) continue;
+      const t = tileAt(r2, c2);
+      if (t !== 3 && t !== 4) continue;
+
+      const ox = c2 - COL_X_OFFSET;
+      const oz = r2;
+      const oy = getGroundY(r2) + OBSTACLE_CENTER_OFFSET;
+
+      const hitXZ = (Math.abs(avatar.x - ox) < 0.9) && (Math.abs(avatar.z - oz) < 0.9);
+      if (!hitXZ) continue;
+
+      /* 3D VERTICAL CLEARANCE — airborne avatars fly cleanly over. */
+      if (avatar.y < oy + 0.8) {
+        triggerCrash(t === 4);
+        return;
+      }
+    }
+  }
+
+  /* Bonus cube pickups */
+  for (let i = 0; i < allBonusCubes.length; i++) {
+    const cb = allBonusCubes[i];
+    if (cb.collected) continue;
+    if (Math.abs(cb.z - avatar.z) > 1.1) continue;
+    if (Math.abs(cb.x - avatar.x) > 0.9) continue;
+    if (Math.abs((avatar.y + 0.5) - cb.y) > 1.0) continue;
+    collectCube(cb);
+  }
+
+  /* ---------- 13h. Finish line ---------- */
+  if (avatar.z >= LEVEL_CONFIG.finish_gate_row) {
+    triggerClear();
+    return;
+  }
+
+  /* ---------- 13i. Timers ---------- */
+  if (boostTimer > 0) boostTimer -= dt;
+  if (warpFlash  > 0) warpFlash  -= dt;
+}
+
+/* ============================================================================
+   14. SLOPE-AWARE TRACKING CAMERA
+   ============================================================================ */
+
+function updateCamera(dt) {
+  const rIdx  = Math.floor(avatar.z / VOXEL_SIZE);
+  const drop  = getGroundY(rIdx) - getGroundY(rIdx + 1);
+  const slopeNorm = Math.max(0, Math.min(1, drop / 0.45));
+
+  /* Step 1 — clamped target offsets (guarantees the proximity constraint). */
+  const targetHeight   = 3.6 + slopeNorm * 1.0;   // 3.6 .. 4.6   (never > 5.0)
+  const targetDistance = 4.8 + slopeNorm * 0.7;   // 4.8 .. 5.5   (never > 6.5)
+
+  /* Step 2 — monotonic offset interpolation, no conditional clamping, no snapping. */
+  camOffset.x += (0 - targetDistance * 0) * 0;    // x-offset target is 0
+  camOffset.x += (0.0 - camOffset.x) * CAMERA_LERP;
+  camOffset.y += (targetHeight - camOffset.y) * CAMERA_LERP;
+  camOffset.z += (-targetDistance - camOffset.z) * CAMERA_LERP;
+
+  camera.position.set(
+    avatar.x + camOffset.x,
+    avatar.y + camOffset.y,
+    avatar.z + camOffset.z
+  );
+
+  /* Step 3 — aim ahead of the avatar. */
+  camera.lookAt(avatar.x, avatar.y + 0.35, avatar.z + 1.5);
+
+  /* Sun + shadow frustum track the avatar tightly. */
+  sunLight.position.set(avatar.x - 22, avatar.y + 34, avatar.z - 16);
+  sunLight.target.position.set(avatar.x, avatar.y, avatar.z + 8);
+  sunLight.target.updateMatrixWorld();
+}
+
+/* ============================================================================
+   15. HUD
+   ============================================================================ */
+
+function updateHUD() {
+  hudTimer.textContent = formatTime(elapsed);
+}
+
+/* ============================================================================
+   16. MAIN LOOP
+   ============================================================================ */
+
+let lastTime = performance.now();
+
+function animate(now) {
+  requestAnimationFrame(animate);
+
+  let dt = (now - lastTime) / 1000;
+  lastTime = now;
+  if (dt > 0.05) dt = 0.05;      // clamp for stability, prevents collision tunnelling
+  if (dt < 0)    dt = 0;
+
+  const t = now / 1000;
+
+  if (state === STATE.SLIDING) {
+    elapsed += dt;
+    updateSlide(dt);
+
+    setWind(avatar.speed, true);
+
+    /* Particle emission */
+    emitAccum += dt;
+    while (emitAccum > 0.018) {
+      emitAccum -= 0.018;
+      spawnParticle();
+    }
+
+    /* Avatar transform + banking tilt */
+    avatarGroup.position.set(avatar.x, avatar.y, avatar.z);
+    const bank = Math.max(-0.45, Math.min(0.45, -avatar.vx * 0.045));
+    avatarGroup.rotation.z += (bank - avatarGroup.rotation.z) * Math.min(1, dt * 10);
+    avatarGroup.rotation.y = Math.max(-0.3, Math.min(0.3, avatar.vx * 0.03));
+  } else {
+    setWind(0, false);
+  }
+
+  updateParticles(dt);
+  updateBonusVisuals(t);
+  updateCamera(dt);
+  updateChunkVisibility();
+  updateHUD();
+
+  renderer.render(scene, camera);
+}
+
+/* ============================================================================
+   17. RESIZE + BOOT
+   ============================================================================ */
+
+window.addEventListener('resize', function () {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+resetGame();
+state = STATE.READY;
+overlay.classList.remove('hidden');
+overlayMsg.textContent = 'PRESS ↑ · TAP TO START';
+overlayTimeEl.style.display = 'none';
+requestAnimationFrame(animate);
+
+})();
+</script>
+</body>
+</html>

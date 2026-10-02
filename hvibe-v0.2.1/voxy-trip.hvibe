@@ -96,6 +96,7 @@
         1. MINIMUM SPACING: Obstacle rows MUST BE separated by at least MIN_OBSTACLE_SPACING_ROWS (10) clear rows to allow reaction time at 14.0 speed.
         2. NAVIGABLE PATH: Every row containing obstacles MUST leave at least 2 adjacent columns open as a safe sliding lane. Wall-to-wall obstacle barricades are strictly forbidden.
         3. OBSTACLE DENSITY: A row MUST NEVER contain more than 2 obstacle blocks simultaneously.
+        4. 3D VERTICAL HITBOX CLEARANCE: Collisions with obstacles (IDs 3 & 4) MUST check vertical altitude (avatar.y < obstacle.y + 0.8). Players jumping via ArrowUp or boosted by Jump Booster pads MUST safely clear obstacles without crashing mid-air.
       `,
 
       neon_canyon_aesthetic: `
@@ -136,7 +137,9 @@
         STRICT HARDWARE PERFORMANCE RULES:
         1. INSTANCING: All floor voxels, canyon wall voxels, guardrails, and items MUST BE grouped into THREE.InstancedMesh objects (or batched) rather than creating separate individual THREE.Mesh instances for each item.
         2. ACTIVE Z WINDOW: Entities, collision tests, and dynamic updates outside the range [avatar.z - ACTIVE_WINDOW_BACK, avatar.z + ACTIVE_WINDOW_FRONT] MUST BE skipped or culled.
-        3. FRUSTUM CULLING & CHUNKING: Long voxel arrays (floors, walls) SHOULD BE partitioned into Z-chunks (e.g. 50 rows per chunk) with native Three.js bounding box frustum culling enabled, preventing the GPU from rendering offscreen geometry.
+        3. THREE.JS INSTANCEDMESH CULLING TRAP & ACTIVE CHUNKING:
+           In Three.js (r128), THREE.InstancedMesh default bounding sphere is centered at (0,0,0) based on base geometry, which causes Three.js to prematurely cull entire track meshes once the camera moves forward along Z. Therefore, generators MUST explicitly set \`mesh.frustumCulled = false\` on all InstancedMesh objects.
+           Mesh visibility MUST BE managed via active Z-windowing: long voxel tracks SHOULD BE partitioned into Z-chunks (e.g. 30 to 50 rows per chunk) whose visibility is toggled (\`chunk.mesh.visible = true/false\`) based on whether the chunk overlaps [avatar.z - ACTIVE_WINDOW_BACK, avatar.z + ACTIVE_WINDOW_FRONT].
         4. SHADOW MAP BUDGET: Directional sunlight shadow map MUST NOT exceed 1024x1024 resolution and MUST focus tightly on the active sliding area around the avatar. Decorative background cliff blocks MUST NOT cast shadows.
       `,
 
@@ -182,7 +185,8 @@
       courseLengthConstraint:   `the level array MUST contain at least 350 rows of terrain to prevent premature stage completion`,
       navigableCourseRule:      `obstacle rows MUST BE separated by at least 10 clear rows, leave at least 2 adjacent columns open, and never exceed 2 obstacles per row`,
       nonHazardousNeonRule:     `glowing neon emissive materials MUST BE strictly reserved for bonus cubes (IDs 5, 6, 7), while obstacles (IDs 3, 4) MUST BE strictly non-emissive matte canyon rock or dark basalt`,
-      renderingOptimizationRule:`the renderer MUST use InstancedMesh grouping, restrict updates to an active Z window, and limit shadow map budget to 1024x1024`,
+      renderingOptimizationRule:`the renderer MUST use InstancedMesh grouping with frustumCulled = false, toggle chunk visibility in an active Z window, and limit shadow map budget to 1024x1024`,
+      obstacleClearanceRule:    `fatal collisions with obstacles (IDs 3, 4) MUST check 3D vertical clearance (avatar.y < obstacle.y + 0.8), allowing jumping or boosted avatars to safely clear obstacles without crashing`,
       declarativeLevelConfig:   `the track data MUST BE structured as an explicit declarative LEVEL_CONFIG object cleanly decoupled from rendering`,
       standaloneBundle:         `the deliverable MUST BE a single HTML document loading Three.js via standard CDN script tag (https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js), with 100% inline CSS and algorithmic audio (zero external media files)`,
       noMockThreeRule:          `the generator MUST NEVER attempt to reimplement, stub, or mock Three.js or WebGL by hand, but MUST strictly include the official Three.js r128 CDN script tag in the HTML head`,
@@ -308,7 +312,7 @@
           rules: {
             obligations: {
               pure_cubes:    `all terrain elements MUST BE constructed strictly from sharp cubic voxels (VOXEL_SIZE)`,
-              optimizations: `MUST group voxels into THREE.InstancedMesh structures and apply active Z-windowing or chunked frustum culling as defined in catalog.logic.rendering_optimizations`
+              optimizations: `MUST group voxels into THREE.InstancedMesh structures with frustumCulled = false, and apply chunked active Z-windowing as defined in catalog.logic.rendering_optimizations`
             }
           },
           tests: [
@@ -345,14 +349,18 @@
           inputs: [`character collision`],
           rules: {
             obligations: {
-              mine_explosion:  `colliding with a mine MUST trigger an explosive radial scatter of voxel debris particles and fail stage`,
-              matte_aesthetic: `obstacles (rock boulders ID 3, mines ID 4) MUST BE rendered with matte, non-emissive canyon stone or dark basalt materials and MUST NEVER use neon or glowing colors`
+              mine_explosion:            `colliding with a mine MUST trigger an explosive radial scatter of voxel debris particles and fail stage`,
+              matte_aesthetic:           `obstacles (rock boulders ID 3, mines ID 4) MUST BE rendered with matte, non-emissive canyon stone or dark basalt materials and MUST NEVER use neon or glowing colors`,
+              vertical_hitbox_clearance: `obstacle collisions (rock boulders ID 3, mines ID 4) MUST check vertical 3D position: a collision is ONLY fatal if avatar.y < obstacle.y + 0.8; airborne players jumping over boulders or boosted by Jump Booster pads MUST safely fly over without crashing`
             },
             constraints: {
               zero_neon_glow: `obstacles MUST NEVER possess glowing or neon shaders to eliminate visual confusion with bonus cubes`
             }
           },
-          tests: ["catalog.tests.nonHazardousNeonRule"]
+          tests: [
+            "catalog.tests.nonHazardousNeonRule",
+            "catalog.tests.obstacleClearanceRule"
+          ]
         }
       }
     },

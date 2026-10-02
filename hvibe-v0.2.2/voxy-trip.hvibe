@@ -1,0 +1,732 @@
+{
+  hvibe_version: "0.2.2",
+  app: "voxy-trip",
+  description: `a high-speed 3D cubic voxel downhill sliding game set in a neon desert canyon, where a sliding voxel character steers with strict arrow/touch controls, jumps, and collects speed, jump, and bounded warp teleporter boosts with algorithmic synthetic audio, tracked closely by a tight dynamic slope-aware camera`,
+  stack: [`javascript`, `three.js`, `web-audio`, `html`, `css`],
+
+  catalog: {
+    globals: `
+      const VOXEL_SIZE = 1.0
+      const GRAVITY = 16.0
+      const BASE_SLIDE_SPEED = 7.0
+      const MAX_SLIDE_SPEED = 14.0
+      const JUMP_FORCE = 6.5
+      const SUPER_JUMP_FORCE = 12.0
+      const BOOST_MULTIPLIER = 1.35
+      const BOOST_DURATION = 2.0
+      const WARP_FORWARD_DISTANCE = 10.0
+      const WARP_ALTITUDE_BOOST = 3.5
+      const STEER_SPEED = 13.0
+      const STEER_DAMPING = 0.86
+      const CAMERA_DISTANCE = 5.5
+      const CAMERA_HEIGHT = 4.2
+      const CAMERA_LERP = 0.1
+
+      // Palette: Neon Cyber-Desert Canyon
+      const COLOR_CANYON_SAND = 0xd97736
+      const COLOR_CANYON_ROCK = 0x8b3a1a
+      const COLOR_NEON_CYAN = 0x00f3ff      // Speed Booster Cube
+      const COLOR_NEON_LIME = 0x39ff14      // Jump Booster Cube (distinct from magenta/cyan)
+      const COLOR_NEON_MAGENTA = 0xff007f   // Warp Teleporter Cube
+      const COLOR_NEON_AMBER = 0xffaa00     // Start/HUD accents
+      const COLOR_AVATAR = 0x00ffff
+
+      // Track & Grid dimensions
+      const TRACK_WIDTH = 12                // Standard track grid width (W)
+      const W = 12
+
+      // Performance & Course tuning
+      const MIN_OBSTACLE_SPACING_ROWS = 10  // At least 10 clear rows between obstacle lines
+      const ACTIVE_WINDOW_BACK = 15.0       // Z units kept behind avatar
+      const ACTIVE_WINDOW_FRONT = 85.0      // Z units rendered ahead of avatar
+
+      // Surface elevation and placement constants (Three.js BoxGeometry center offset)
+      // 1. FLOOR VOXELS: BoxGeometry(1,1,1) centered strictly at y = groundY (ZERO vertical offset).
+      // 2. WALKING SURFACE: Top face of floor voxel is at surface_y = groundY + SURFACE_Y_OFFSET (0.5).
+      // 3. AVATAR: Base sits flush on walking surface (avatar.y = surface_y = groundY + 0.5).
+      // 4. OBSTACLES: BoxGeometry(1,1,1) centered at y = groundY + OBSTACLE_CENTER_OFFSET (1.0), base rests flush on floor surface at groundY + 0.5.
+      // 5. BONUS CUBES: BoxGeometry(0.8,0.8,0.8) centered at y = groundY + BONUS_FLOAT_OFFSET (1.3), base hovers cleanly at groundY + 0.9 (0.4 units above surface).
+      const SURFACE_Y_OFFSET       = 0.5;   // Walking surface = groundY + SURFACE_Y_OFFSET
+      const BONUS_FLOAT_OFFSET     = 1.3;   // Floating bonus cubes centered at groundY + BONUS_FLOAT_OFFSET
+      const OBSTACLE_CENTER_OFFSET = 1.0;   // 1-unit obstacles centered at groundY + OBSTACLE_CENTER_OFFSET
+    `,
+
+    logic: {
+      descent_and_air_physics: `
+        Downhill sliding and airborne gravity physics:
+        1. Forward velocity advances automatically along the course at moderate speed (BASE_SLIDE_SPEED = 7.0), boosted by downhill slopes up to MAX_SLIDE_SPEED (14.0).
+        2. Lateral steering (X axis) is strictly controlled by ArrowLeft / ArrowRight or touch zones with smooth velocity damping.
+        3. Jump mechanics: pressing ArrowUp (or mobile swipe up / dual touch) triggers a vertical velocity impulse (JUMP_FORCE = 6.5).
+        4. CONTINUOUS GROUND SURFACE INTERPOLATION & GLIDE MANDATE:
+           - FLOOR VOXEL MESH PLACEMENT (STRICT ZERO-OFFSET):
+             Floor voxels (BoxGeometry 1,1,1) MUST BE placed strictly at y = getGroundY(r) with ZERO vertical offset.
+             Generators MUST NEVER add an offset to the floor voxel's Y coordinate (i.e. NEVER write 'floor.push(x, gy + 0.5, r)').
+             Because the floor voxel is centered at y = getGroundY(r), its top walking surface is automatically at:
+             floor_surface_y = groundY + SURFACE_Y_OFFSET (0.5).
+           - To guarantee perfectly smooth gliding with ZERO stair-step bouncing, popping, or spurious airborne transitions, ground elevation at any continuous Z position MUST BE linearly interpolated between adjacent row ground elevations:
+             const r = Math.floor(avatar.z / VOXEL_SIZE);
+             const frac = (avatar.z / VOXEL_SIZE) - r;
+             const current_ground_y = (1.0 - frac) * getGroundY(r) + frac * getGroundY(r + 1);
+             const current_surface_y = current_ground_y + SURFACE_Y_OFFSET;
+           - When grounded (avatar.grounded === true), avatar.y MUST equal current_surface_y continuously. The avatar MUST NOT drop into an airborne falling state simply from sliding down a slope.
+           - Airborne state (avatar.grounded === false) is ONLY entered when the player jumps (ArrowUp / touch) or slides off a pit gap (tile === 0).
+           - When airborne, avatar is subject to continuous gravity (vy -= GRAVITY * dt; avatar.y += vy * dt). Upon reaching avatar.y <= current_surface_y, avatar lands smoothly: avatar.y = current_surface_y, vy = 0, avatar.grounded = true.
+           - Void fall: if avatar falls below relative track elevation threshold (avatar.y < current_ground_y - 12.0), stage failure triggers. It MUST BE calculated relative to current_ground_y, NEVER as an absolute world Y < -12.
+      `,
+
+      boost_mechanics: `
+        Three cubic power-up interactions with distinct glowing neon materials:
+        1. Speed Booster (ID 5, Glowing Neon Cyan - COLOR_NEON_CYAN): grants temporary 1.35x speed boost and intensifies cyan particle trail.
+        2. Jump Booster (ID 6, Glowing Neon Lime - COLOR_NEON_LIME): imparts an instant SUPER_JUMP_FORCE (12.0) upward, launching avatar over chasm gaps.
+        3. Warp Teleporter (ID 7, Glowing Neon Magenta - COLOR_NEON_MAGENTA): instantly teleports avatar forward within a strict bounded proximity radius of WARP_FORWARD_DISTANCE (10.0 units) and moderate height (+3.5 Y units), acting as a localized gap leap.
+        VISUAL EXCLUSIVITY & INSTANCING RULES:
+        - Only bonus cubes (IDs 5, 6, 7) are floating, rotating, and emit luminous neon light.
+        - Obstacles (IDs 3, 4) MUST NEVER use neon or glowing emissive colors; they MUST remain matte canyon rock or dark basalt.
+        - BONUS PLACEMENT: Bonus cubes MUST BE centered at y = groundY + BONUS_FLOAT_OFFSET (1.3) so their bottom edge (at y = groundY + 0.9) hovers cleanly 0.4 units above the floor surface (groundY + 0.5). Hover animation oscillation amplitude MUST NOT exceed 0.1 so the bottom is always strictly at least 0.3 units above the floor with ZERO floor penetration.
+        - LOCAL ROTATION: Each bonus cube instance MUST rotate individually on its own local center axis (using dummy.rotation and setMatrixAt per instance). The generator MUST NEVER rotate the parent Group or InstancedMesh around the world origin (0,0,0).
+        - PICKUP CONSUMPTION: When an avatar collects a bonus cube, that specific instance MUST immediately disappear (e.g. scaled to 0 or translated off-screen).
+      `,
+
+      cubic_particle_trail: `
+        Continuous particle trail behind the avatar:
+        1. Emits small cubic voxel particles from the avatar's base at regular sliding intervals.
+        2. Particles inherit a fraction of the avatar's velocity, shrink over a brief lifespan (~0.6s), and fade out.
+        3. Particle color shifts dynamically: cyan during normal sliding, magenta during speed boost, lime/amber during warp/airborne.
+      `,
+
+      synthetic_audio_synthesis: `
+        STRICT ALGORITHM:
+        All game audio is synthesized algorithmically via Web Audio API without external audio files:
+        1. Glide / Wind loop: Procedural white noise buffer passed through a BiquadFilter (bandpass). Filter cutoff frequency modulates proportionally with sliding speed (400 Hz to 1800 Hz).
+        2. Jump sound: OscillatorNode with rapid upward frequency sweep (200 Hz to 650 Hz, 0.12s exponential decay).
+        3. Boost pickup: Arpeggiated dual oscillator chime (triangle wave: 440 Hz then 880 Hz, 0.25s).
+        4. Warp teleporter: Frequency modulated oscillator producing a high-tech phasing sweep (800 Hz down to 200 Hz with fast vibrato).
+        5. Explosion: Burst of white noise with steep lowpass decay (80 Hz) and rapid gain envelope decay (0.4s).
+        6. Victory fanfare: Ascending major triad notes (C5, E5, G5, C6) on square wave with gentle lowpass filtering.
+      `,
+
+      level_1_course_design: `
+        Structured 5-phase downhill level progression lasting at least 35 to 50 seconds:
+        - Total length MUST BE at least 350 rows of terrain blocks.
+        - Phase 1: Initiation Slope (~70 rows: wide 12-block track, gentle downhill gradient, introductory speed booster).
+        - Phase 2: Narrow Canyon Chasm (~80 rows: track narrows to 6 blocks, canyon walls rise, spaced rock boulders to steer around).
+        - Phase 3: Minefield Alley (~80 rows: alternating speed boosters and dark basalt mines requiring lateral slalom).
+        - Phase 4: The Great Abyss Leap (~60 rows: track breaks into a canyon gap; an airborne Warp Teleporter launches the player across the chasm).
+        - Phase 5: Final Downhill Sprint (~70 rows: steepest descent, jump booster pads to clear terminal hazards, leading into the neon finish line gate).
+
+        STRICT NAVIGABILITY & SPACING RULES:
+        1. MINIMUM SPACING: Obstacle rows MUST BE separated by at least MIN_OBSTACLE_SPACING_ROWS (10) clear rows to allow reaction time at 14.0 speed.
+        2. NAVIGABLE PATH: Every row containing obstacles MUST leave at least 2 adjacent columns open as a safe sliding lane. Wall-to-wall obstacle barricades are strictly forbidden.
+        3. OBSTACLE DENSITY: A row MUST NEVER contain more than 2 obstacle blocks simultaneously.
+        4. 3D VERTICAL HITBOX CLEARANCE: Collisions with obstacles (IDs 3 & 4) MUST check vertical altitude (avatar.y < obstacle.y + 0.8). Players jumping via ArrowUp or boosted by Jump Booster pads MUST safely clear obstacles without crashing mid-air.
+      `,
+
+      neon_canyon_aesthetic: `
+        Strict geometric voxel design:
+        - Everything in the world is strictly cubic: avatar, canyon walls, obstacles, and floating boost items.
+        - Visual theme fuses warm desert canyon terra-cotta tones with glowing synthwave neon accents:
+          * Canyon terrain: warm orange and rust-red stepped voxel cliffs.
+          * Track bed: dark sandstone with luminous neon-cyan side guardrail blocks.
+          * Horizon: atmospheric synthwave dusk gradient with directional sunset sunlight and soft voxel shadows.
+      `,
+
+      portable_level_format: `
+        STRICT
+        Engine-agnostic declarative level configuration:
+        The level is defined as an explicit, serializable configuration object declared at the start of the script:
+        const LEVEL_CONFIG = {
+          name: "Neon Canyon Descent",
+          width: 12,
+          total_rows: 360,
+          slope_profile: [...], // Array of downhill slope deltas per section
+          grid: [...]           // Array of rows containing integer tile IDs
+        };
+
+        Tile ID encoding:
+          0 = Pit / Void (no floor)
+          1 = Standard canyon sand track voxel (centered strictly at groundY, top surface at groundY + 0.5)
+          2 = Downhill slope ramp voxel
+          3 = Solid canyon rock boulder (fatal collision, matte COLOR_CANYON_ROCK, centered at y = groundY + OBSTACLE_CENTER_OFFSET (1.0), resting flush on floor surface)
+          4 = Dark basalt explosive mine (fatal collision, matte dark 0x221111, NO neon glow, centered at y = groundY + OBSTACLE_CENTER_OFFSET (1.0))
+          5 = Speed Booster Cube (glowing COLOR_NEON_CYAN, centered at y = groundY + BONUS_FLOAT_OFFSET (1.3), hovering cleanly above floor)
+          6 = Jump Booster Cube (glowing COLOR_NEON_LIME, centered at y = groundY + BONUS_FLOAT_OFFSET (1.3))
+          7 = Warp Teleporter Cube (glowing COLOR_NEON_MAGENTA, centered at y = groundY + BONUS_FLOAT_OFFSET (1.3))
+          8 = Start Gate (neon arch)
+          9 = Finish Gate (neon arch)
+      `,
+
+      rendering_optimizations: `
+        STRICT HARDWARE PERFORMANCE RULES:
+        1. INSTANCING: All floor voxels, canyon wall voxels, guardrails, and items MUST BE grouped into THREE.InstancedMesh objects (or batched) rather than creating separate individual THREE.Mesh instances for each item.
+        2. ACTIVE Z WINDOW: Entities, collision tests, and dynamic updates outside the range [avatar.z - ACTIVE_WINDOW_BACK, avatar.z + ACTIVE_WINDOW_FRONT] MUST BE skipped or culled.
+        3. THREE.JS INSTANCEDMESH CULLING TRAP & ACTIVE CHUNKING:
+           In Three.js (r128), THREE.InstancedMesh default bounding sphere is centered at (0,0,0) based on base geometry, which causes Three.js to prematurely cull entire track meshes once the camera moves forward along Z. Therefore, generators MUST explicitly set \`mesh.frustumCulled = false\` on all InstancedMesh objects.
+           Mesh visibility MUST BE managed via active Z-windowing: long voxel tracks SHOULD BE partitioned into Z-chunks (e.g. 30 to 50 rows per chunk) whose visibility is toggled (\`chunk.mesh.visible = true/false\`) based on whether the chunk overlaps [avatar.z - ACTIVE_WINDOW_BACK, avatar.z + ACTIVE_WINDOW_FRONT].
+        4. SHADOW MAP BUDGET: Directional sunlight shadow map MUST NOT exceed 1024x1024 resolution and MUST focus tightly on the active sliding area around the avatar. Decorative background cliff blocks MUST NOT cast shadows.
+        5. VOXEL INSTANCE VERTICAL POSITIONING (STRICT ZERO-OFFSET FOR FLOOR):
+           - Floor voxels (BoxGeometry 1,1,1) MUST BE placed strictly at (x, getGroundY(r), r) with ZERO vertical offset. The generator MUST NEVER write \`gy + 0.5\` or \`gy + offset\` when creating floor mesh instances.
+           - Guardrail voxels (BoxGeometry 1,1,1) MUST BE placed at (x, getGroundY(r) + 1.0, r), resting flush on top of the floor surface.
+           - Cliff side voxels MUST start at y = getGroundY(r) + 1.0 + step, rising above the floor.
+      `,
+
+      camera_tracking_algorithm: `
+        STRICT ALGORITHM:
+        Smooth close-proximity follower camera tracking:
+        1. Calculate target coordinates relative to avatar coordinates:
+           - current_slope: downhill gradient at current row.
+           - pitch_angle: between 45° (gentle) and 60° (steep downhill).
+           - target_height: clamped between 3.6 and 4.6 (MUST NEVER exceed 5.0).
+           - target_distance: clamped between 4.8 and 5.5 (MUST NEVER exceed 6.5).
+           - cam_target_x = avatar.x
+           - cam_target_y = avatar.y + target_height
+           - cam_target_z = avatar.z - target_distance
+        2. Interpolate camera position monotonically:
+           camera.position.x += (cam_target_x - camera.position.x) * CAMERA_LERP;
+           camera.position.y += (cam_target_y - camera.position.y) * CAMERA_LERP;
+           camera.position.z += (cam_target_z - camera.position.z) * CAMERA_LERP;
+        3. Aim camera forward ahead of avatar:
+           camera.lookAt(avatar.x, avatar.y + 0.35, avatar.z + 1.5);
+        4. ANTI-JITTER MANDATE:
+           The generator MUST NEVER execute secondary conditional clamping checks that re-lerp or overwrite camera position (such as 'if (dist > 6.5) camera.position.lerp(...)'). Target offset clamping in Step 1 inherently guarantees the proximity constraint with zero 60Hz camera jitter.
+      `
+    },
+
+    tests: {
+      portableLevelFormat:      `the level structure MUST BE represented as pure data completely decoupled from Three.js or rendering classes`,
+      pureCubicAesthetic:       `all visual game assets (avatar, terrain, hazards, and boosts) MUST BE rendered exclusively as sharp cubic voxels`,
+      suspenseHudRule:          `the HUD MUST display an active elapsed time chronometer, but MUST NOT display a track progress bar or completion percentage to preserve suspense`,
+      syntheticAudioOnly:       `all sound effects MUST BE synthesized algorithmically in memory via Web Audio API with zero external audio file requests`,
+      touchInputMapping:        `on touch devices, touching the left half of the screen MUST steer left, and touching the right half MUST steer right`,
+      jumpPhysics:              `pressing ArrowUp on keyboard or triggering jump MUST impart positive vertical velocity JUMP_FORCE`,
+      gravityContinuity:        `the avatar MUST ALWAYS remain subject to GRAVITY when airborne or following a teleporter warp`,
+      speedBoostEffect:         `collecting a speed boost cube MUST increase forward velocity by BOOST_MULTIPLIER for BOOST_DURATION seconds`,
+      jumpBoostEffect:          `contacting a jump booster cube MUST launch avatar with SUPER_JUMP_FORCE`,
+      teleportRadiusBounded:    `contacting a teleporter cube MUST shift avatar Z position forward by at most 10.0 units within a bounded proximity radius`,
+      particleTrailActive:      `a continuous stream of cubic particles MUST BE emitted behind the moving avatar`,
+      cameraTracking:           `camera position MUST smoothly track avatar coordinates with dynamic pitch adaptation between 45° and 60°`,
+      cameraProximityConstraint:`camera distance behind avatar MUST NEVER exceed 6.5 units and height MUST NEVER exceed 5.0 units`,
+      smoothCameraNoJitter:     `camera interpolation MUST BE smooth and continuous with zero conditional snapping or high-frequency oscillation`,
+      strictThreeKeysOnly:      `the keyboard event listener MUST ONLY handle ArrowLeft, ArrowRight, and ArrowUp, and MUST NEVER bind Space, A, D, or any letter keys`,
+      speedLimitsConstraint:    `forward sliding velocity MUST NEVER exceed 14.0 units per second`,
+      courseLengthConstraint:   `the level array MUST contain at least 350 rows of terrain to prevent premature stage completion`,
+      navigableCourseRule:      `obstacle rows MUST BE separated by at least 10 clear rows, leave at least 2 adjacent columns open, and never exceed 2 obstacles per row`,
+      nonHazardousNeonRule:     `glowing neon emissive materials MUST BE strictly reserved for bonus cubes (IDs 5, 6, 7), while obstacles (IDs 3, 4) MUST BE strictly non-emissive matte canyon rock or dark basalt`,
+      renderingOptimizationRule:`the renderer MUST use InstancedMesh grouping with frustumCulled = false, toggle chunk visibility in an active Z window, and limit shadow map budget to 1024x1024`,
+      obstacleClearanceRule:    `fatal collisions with obstacles (IDs 3, 4) MUST check 3D vertical clearance (avatar.y < obstacle.y + 0.8), allowing jumping or boosted avatars to safely clear obstacles without crashing`,
+      declarativeLevelConfig:   `the track data MUST BE structured as an explicit declarative LEVEL_CONFIG object cleanly decoupled from rendering`,
+      standaloneBundle:         `the deliverable MUST BE a single HTML document loading Three.js via standard CDN script tag (https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js), with 100% inline CSS and algorithmic audio (zero external media files)`,
+      noMockThreeRule:          `the generator MUST NEVER attempt to reimplement, stub, or mock Three.js or WebGL by hand, but MUST strictly include the official Three.js r128 CDN script tag in the HTML head`,
+      overlayVisibilityRule:    `the start/title overlay MUST BE hidden completely while in SLIDING state, and only shown during READY, CRASHED, or CLEARED states`,
+      continuousGroundGlide:    `ground elevation at continuous Z position MUST BE linearly interpolated between adjacent row heights, ensuring avatar.y continuously equals ground_surface_y (groundY + 0.5) with ZERO discrete stair-step bouncing or spurious mid-slope air time`,
+      zeroFloorPenetration:     `Three.js BoxGeometry center offset MUST BE respected: floor voxels are centered at y = groundY (zero offset) so top surface is groundY + 0.5; avatar base sits at groundY + 0.5; 1-unit obstacles center at groundY + 1.0 (flush on floor); and bonus cubes center at groundY + 1.3 (hovering cleanly at least 0.3 units above floor with ZERO penetration)`,
+      deliveryIntegrity:        `the deliverable MUST BE a single unbroken HTML document from <!DOCTYPE html> to </html> with zero mid-stream restarts, zero markdown link syntax inside HTML tags (e.g. no [url](url)), and clean JavaScript syntax that initializes without runtime errors`
+    },
+
+    guards: {
+      instanced_mesh_culling: `
+        BEWARE OF Three.js (r128) InstancedMesh bounding sphere defaulting to origin (0,0,0) based on base geometry, which causes Three.js to prematurely cull entire track meshes once the camera moves forward along Z.
+        FORBIDDEN SHORTCUT: setting frustumCulled = true on InstancedMesh or relying on automatic bounding spheres.
+        MANDATED RESOLUTION: explicitly set mesh.frustumCulled = false on all InstancedMesh objects, and manage culling strictly via software active Z-window chunk visibility toggles (chunk.mesh.visible = true/false).
+      `,
+
+      obstacle_vertical_clearance: `
+        BEWARE OF 2D grid row/column collision shortcuts that ignore the Y altitude axis.
+        FORBIDDEN SHORTCUT: testing obstacle collisions solely against (row, col) without checking avatar.y, which causes fatal mid-air collisions when jumping.
+        MANDATED RESOLUTION: enforce full 3D collision checking (avatar.y < obstacle.y + 0.8) so airborne players jumping via ArrowUp or boosted by Jump Booster pads safely clear obstacles.
+      `,
+
+      no_mock_threejs_engine: `
+        BEWARE OF token panic or context overload prompting the model to recreate a hand-written 2.5D or fake 3D engine instead of using the Three.js library.
+        FORBIDDEN SHORTCUT: hand-rolling a custom software 3D/rasterizer engine or inlining 600KB of raw library code.
+        MANDATED RESOLUTION: strictly include the official Three.js r128 CDN script tag in the HTML head and use official THREE classes.
+      `,
+
+      local_instance_matrix_rotation: `
+        BEWARE OF rotating the parent Group or InstancedMesh around the world origin (0,0,0) when animating bonus cubes.
+        FORBIDDEN SHORTCUT: rotating the container object, which sends cubes into a wild global orbit around (0,0,0).
+        MANDATED RESOLUTION: rotate each bonus cube instance locally around its own center axis using dummy.position, dummy.rotation, and mesh.setMatrixAt(i, dummy.matrix) with mesh.instanceMatrix.needsUpdate = true.
+      `,
+
+      start_grounded_input_isolation: `
+        BEWARE OF ArrowUp keypress or touch tap triggering both run start and a frame-0 jump impulse simultaneously.
+        FORBIDDEN SHORTCUT: sharing a single raw input event for state transition and jump physics without state gating.
+        MANDATED RESOLUTION: when in READY state, ArrowUp or touch must strictly transition state to SLIDING and start forward motion, explicitly suppressing any vertical jump impulse on the start frame.
+      `,
+
+      relative_void_fall_threshold: `
+        BEWARE OF testing abyss fall against an absolute world coordinate (such as avatar.y < -12), because the downhill track elevation continuously descends below -25 units.
+        FORBIDDEN SHORTCUT: hardcoding absolute Y fall threshold.
+        MANDATED RESOLUTION: calculate void fall threshold relative to the current row floor ground elevation (avatar.y < current_row_ground_y - 12.0).
+      `,
+
+      camera_smooth_monotonic_lerp: `
+        BEWARE OF adding secondary conditional clamping lerps or position overwrites (e.g. if (dist > 6.5) camera.position.lerp) that introduce 60Hz camera jitter.
+        FORBIDDEN SHORTCUT: post-processing or re-lerping camera position after standard offset interpolation.
+        MANDATED RESOLUTION: interpolate camera monotonically along X, Y, and Z toward target offsets that are already clamped in step 1.
+      `,
+
+      overlay_lifecycle_visibility: `
+        BEWARE OF start screen or restart overlay elements remaining semi-transparent or visible during active gameplay.
+        FORBIDDEN SHORTCUT: failing to toggle overlay display property on game state transition.
+        MANDATED RESOLUTION: set title/start overlay display to 'none' (or opacity: 0) while in SLIDING state, and only restore visibility during READY, CRASHED, or CLEARED states.
+      `,
+
+      continuous_ground_interpolation: `
+        BEWARE OF calculating ground elevation strictly from discrete row indexing (e.g. groundY = getGroundY(Math.floor(avatar.z / VOXEL_SIZE))) and testing avatar.y > groundY + 0.4.
+        FORBIDDEN SHORTCUT: discrete integer row floor lookup on sloped/stepped terrain, which makes the avatar "drop" over every 1-unit row edge into an airborne gravity state, producing jerky stair-step bouncing 60 times per second.
+        MANDATED RESOLUTION: interpolate ground elevation continuously between rows:
+          const r = Math.floor(avatar.z / VOXEL_SIZE);
+          const frac = (avatar.z / VOXEL_SIZE) - r;
+          const current_ground_y = (1.0 - frac) * getGroundY(r) + frac * getGroundY(r + 1);
+          const surface_y = current_ground_y + 0.5;
+        When grounded, avatar.y MUST strictly equal surface_y. Airborne falling state is ONLY triggered by jumping (ArrowUp / touch) or driving off an abyss pit (tile === 0).
+      `,
+
+      floor_voxel_zero_offset: `
+        BEWARE OF adding an offset to the floor voxel mesh instance position (e.g. floor.push(x, gy + 0.5, r) or gy + SURFACE_Y_OFFSET).
+        FORBIDDEN SHORTCUT: shifting floor voxels upward by 0.5 units, which pushes the top surface of the floor up to gy + 1.0, thereby burying the avatar (at gy + 0.5), obstacles (at gy + 1.0), and bonus cubes (at gy + 1.3) deep inside the floor mesh!
+        MANDATED RESOLUTION: floor voxels (BoxGeometry 1,1,1) MUST BE placed strictly at y = gy (mesh Y position is exactly getGroundY(r), NEVER gy + 0.5). Their top walking surface is automatically at gy + 0.5. The avatar base sits at surface_y (gy + 0.5), obstacles are centered at gy + 1.0, and bonus cubes are centered at gy + 1.3.
+      `,
+
+      box_geometry_center_alignment: `
+        BEWARE OF Three.js BoxGeometry(w, h, d) having its origin at the geometric center [-h/2, +h/2], not at the bottom base.
+        FORBIDDEN SHORTCUT:
+          1. Adding an offset to the floor voxel itself (writing floor.push(x, gy + 0.5, r)), which raises the floor surface to gy + 1.0 and buries all entities!
+          2. Placing obstacles at y = groundY + 0.5 (burying bottom half in floor) or avatar at y = groundY + 0.4 (sinking 0.1 units) or bonus cubes at y = groundY + 0.8 (sinking 0.1 units).
+        MANDATED RESOLUTION: calculate all Y coordinates using top-surface reference (floor surface is at groundY + 0.5):
+          - Floor voxel mesh: centered strictly at y = getGroundY(r) with ZERO offset (top surface is at getGroundY(r) + 0.5).
+          - Avatar base at surface: avatar.y = surface_y (bottom sits flush on surface).
+          - Obstacles (height 1.0): centered at y = groundY + 1.0 (bottom rests flush at groundY + 0.5).
+          - Bonus cubes (height 0.8): centered at y = groundY + 1.3 (bottom hovers at groundY + 0.9, floating cleanly at least 0.3 units above floor with ZERO penetration during animation).
+      `,
+
+      output_stream_integrity: `
+        BEWARE OF stream interruptions, restarting code blocks midway through, or hallucinating markdown links inside HTML tags (e.g. script src="[https://...](https://...)").
+        FORBIDDEN SHORTCUT: emitting multiple <!DOCTYPE html> tags, leaving unclosed script tags, or inserting markdown code blocks (\`\`\`html) inside JavaScript.
+        MANDATED RESOLUTION: verify document integrity before ending output: ensure exactly one continuous HTML file, clean raw URL strings in script src attributes, and complete syntactic validity with zero parsing errors.
+      `
+    }
+  },
+
+  units: {
+    output: {
+      name: "Output Deliverable",
+      features: {
+        bundle: {
+          description: `a single self-contained HTML file housing the Three.js viewport, procedural audio synthesizer, physics, and controls`,
+          inputs: [`code generation`],
+          rules: {
+            obligations: {
+              self_contained: `MUST produce a single HTML file with inline CSS, official Three.js loaded via standard CDN script tag (https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js), purely procedural Web Audio, and zero external media files (no external PNG, MP3, WAV, or GLTF)`,
+              file_coherence: `MUST verify file integrity at the end to ensure the output is a single continuous, non-truncated document with zero mid-file restarts, zero markdown syntax inside HTML attributes, and complete syntactic validity`
+            },
+            constraints: {
+              no_mock_three: `the generator MUST NEVER attempt to reimplement, stub, or recreate a custom WebGL/Three.js engine by hand, and MUST NEVER inline 600KB of raw library code; it MUST strictly include the official Three.js r128 CDN script tag in the HTML head`,
+              no_corrupt_stream: `the generator MUST NEVER output partial code, restart generation midway, or emit markdown code blocks inside JavaScript; the document MUST be immediately runnable`
+            }
+          },
+          tests: [
+            "catalog.tests.standaloneBundle",
+            "catalog.tests.noMockThreeRule",
+            "catalog.tests.deliveryIntegrity"
+          ],
+          guards: [
+            "catalog.guards.no_mock_threejs_engine",
+            "catalog.guards.output_stream_integrity"
+          ]
+        }
+      }
+    },
+
+    engine: {
+      name: "3D Rendering Engine",
+      description: `Three.js scene management, neon desert canyon atmosphere, voxel lighting, and render loop`,
+      features: {
+        canyon_atmosphere: {
+          description: `dusk synthwave sky gradient, warm directional sunlight, ambient fill light, and neon glow accents`,
+          inputs: [`DOM mount`],
+          rules: {
+            obligations: {
+              lighting: `MUST configure directional sunlight casting soft shadows on stepped voxel canyon cliffs`,
+              palette:  `MUST render stepped canyon terrain in terracotta/orange tones with glowing cyan and magenta accents`
+            },
+            constraints: {
+              shadow_budget: `directional sunlight shadow map MUST NOT exceed 1024x1024 with an orthographic frustum closely tracking the avatar`
+            }
+          },
+          tests: ["catalog.tests.renderingOptimizationRule"],
+          blueprints: ["catalog.logic.neon_canyon_aesthetic"]
+        },
+
+        render_loop: {
+          description: `main requestAnimationFrame cycle advancing physics, audio modulation, particles, camera tracking, and scene rendering`,
+          inputs: [`browser animation frame`],
+          rules: {
+            obligations: {
+              delta_time:    `all kinematics, gravity, and particle lifespans MUST BE scaled by frame delta time`,
+              active_window: `physics collision queries and interactive item updates MUST BE bounded to the active Z window to guarantee sustained 60 FPS`
+            }
+          },
+          tests: ["catalog.tests.renderingOptimizationRule"]
+        }
+      }
+    },
+
+    audio: {
+      name: "Procedural Audio Synthesizer",
+      description: `purely algorithmic Web Audio sound effects generated dynamically from math and noise buffers`,
+      features: {
+        sound_engine: {
+          description: `in-memory audio context synthesizing slide wind whoosh, jumps, boosts, warps, mine explosions, and victory fanfare`,
+          inputs: [`game events: slide, jump, boost, warp, crash, win`],
+          rules: {
+            obligations: {
+              procedural_generation: `MUST synthesize all sounds using Web Audio API nodes (OscillatorNode, BiquadFilterNode, AudioBufferSourceNode with generated noise) with zero external media files`,
+              speed_reactive_glide: `MUST dynamically modulate the glide wind filter cutoff frequency based on current avatar forward speed`
+            }
+          },
+          tests: ["catalog.tests.syntheticAudioOnly"],
+          blueprints: ["catalog.logic.synthetic_audio_synthesis"]
+        }
+      }
+    },
+
+    world: {
+      name: "Neon Canyon Level & Items",
+      description: `portable track representation, stepped voxel cliffs, hazards, and floating cubic bonus items`,
+      features: {
+        level_data: {
+          description: `pure data matrix defining the 5-phase course: initiation, narrow chasm, minefield, abyss warp leap, and final sprint`,
+          inputs: [`stage initialization`],
+          rules: {
+            obligations: {
+              serializable:       `MUST encode track using engine-agnostic tile IDs (0 to 9)`,
+              declarative_config: `MUST declare course structure via an explicit portable LEVEL_CONFIG object cleanly decoupled from Three.js scene code`,
+              five_phases:        `course MUST implement the 5 structured phases defined in catalog.logic.level_1_course_design ending in finish gate ID 9`
+            },
+            constraints: {
+              min_length:            `the track array MUST contain at least 350 sequential rows of terrain to provide an immersive 35 to 50 seconds run`,
+              navigability_spacing:  `obstacle rows MUST BE separated by at least MIN_OBSTACLE_SPACING_ROWS (10) clear rows, MUST leave at least 2 open columns on any row, and MUST NEVER generate impassable wall-to-wall obstacle barricades`
+            }
+          },
+          tests: [
+            "catalog.tests.portableLevelFormat",
+            "catalog.tests.declarativeLevelConfig",
+            "catalog.tests.courseLengthConstraint",
+            "catalog.tests.navigableCourseRule"
+          ],
+          blueprints: [
+            "catalog.logic.portable_level_format",
+            "catalog.logic.level_1_course_design"
+          ]
+        },
+
+        voxel_geometry: {
+          description: `instanced cubic mesh generation for track floor, canyon wall steps, guardrails, and items with performance acceleration`,
+          inputs: [`level_data loaded`],
+          depends_on: [
+            {
+              feature: `level_data`,
+              when: [`generating 3D world from data`]
+            }
+          ],
+          rules: {
+            obligations: {
+              pure_cubes:    `all terrain elements MUST BE constructed strictly from sharp cubic voxels (VOXEL_SIZE)`,
+              optimizations: `MUST group voxels into THREE.InstancedMesh structures with frustumCulled = false, and apply chunked active Z-windowing as defined in catalog.logic.rendering_optimizations`
+            }
+          },
+          tests: [
+            "catalog.tests.pureCubicAesthetic",
+            "catalog.tests.renderingOptimizationRule",
+            "catalog.tests.zeroFloorPenetration"
+          ],
+          guards: [
+            "catalog.guards.instanced_mesh_culling",
+            "catalog.guards.floor_voxel_zero_offset",
+            "catalog.guards.box_geometry_center_alignment"
+          ],
+          blueprints: ["catalog.logic.rendering_optimizations"]
+        },
+
+        bonus_cubes: {
+          description: `floating, rotating glowing cubic power-ups on the track: Speed Booster (Cyan), Jump Booster (Lime), and Warp Teleporter (Magenta)`,
+          inputs: [`character intersection`],
+          depends_on: [
+            {
+              feature: `level_data`,
+              when: [`placing bonus items at coordinates (IDs 5, 6, 7)`]
+            }
+          ],
+          rules: {
+            obligations: {
+              item_visuals: `bonus items MUST BE floating glowing cubes with continuous gentle rotation`,
+              cube_types:   `MUST implement Speed Booster (ID 5, glowing Cyan), Jump Booster (ID 6, glowing Lime), and Warp Teleporter (ID 7, glowing Magenta)`
+            },
+            constraints: {
+              neon_exclusivity: `glowing neon emissive materials are strictly reserved for bonus cubes (IDs 5, 6, 7) so players instantly recognize beneficial power-ups`
+            }
+          },
+          tests: [
+            "catalog.tests.nonHazardousNeonRule",
+            "catalog.tests.zeroFloorPenetration"
+          ],
+          guards: [
+            "catalog.guards.local_instance_matrix_rotation",
+            "catalog.guards.box_geometry_center_alignment"
+          ],
+          blueprints: ["catalog.logic.boost_mechanics"]
+        },
+
+        hazards: {
+          description: `deadly obstacles: solid rock boulders, abyss pits, and dark basalt mines`,
+          inputs: [`character collision`],
+          rules: {
+            obligations: {
+              mine_explosion:            `colliding with a mine MUST trigger an explosive radial scatter of voxel debris particles and fail stage`,
+              matte_aesthetic:           `obstacles (rock boulders ID 3, mines ID 4) MUST BE rendered with matte, non-emissive canyon stone or dark basalt materials and MUST NEVER use neon or glowing colors`,
+              vertical_hitbox_clearance: `obstacle collisions (rock boulders ID 3, mines ID 4) MUST check vertical 3D position: a collision is ONLY fatal if avatar.y < obstacle.y + 0.8; airborne players jumping over boulders or boosted by Jump Booster pads MUST safely fly over without crashing`
+            },
+            constraints: {
+              zero_neon_glow: `obstacles MUST NEVER possess glowing or neon shaders to eliminate visual confusion with bonus cubes`
+            }
+          },
+          tests: [
+            "catalog.tests.nonHazardousNeonRule",
+            "catalog.tests.obstacleClearanceRule",
+            "catalog.tests.zeroFloorPenetration"
+          ],
+          guards: [
+            "catalog.guards.obstacle_vertical_clearance",
+            "catalog.guards.box_geometry_center_alignment"
+          ]
+        }
+      }
+    },
+
+    character: {
+      name: "Voxel Sliding Avatar & Trail",
+      description: `cubic avatar gliding downhill with calibrated speed, tight steering inertia, jumping ability, and continuous particle trail`,
+      features: {
+        avatar_mesh: {
+          description: `a sleek cubic voxel character with expressive glowing visor and dynamic banking tilt when turning`,
+          inputs: [`scene init`],
+          rules: {
+            obligations: {
+              cubic_form: `avatar MUST BE composed of sharp cubic voxels with contrasting neon visor and base runner`
+            }
+          },
+          tests: ["catalog.tests.pureCubicAesthetic"]
+        },
+
+        slide_and_air_kinematics: {
+          description: `computes continuous downhill slide, lateral steering, jump impulse, and airborne gravity`,
+          inputs: [`frame tick`, `player steering / jump input`],
+          depends_on: [
+            {
+              feature: `avatar_mesh`,
+              when: [`updating position and banking angle`]
+            },
+            {
+              feature: `world.voxel_geometry`,
+              when: [`determining ground contact and slope`]
+            }
+          ],
+          rules: {
+            obligations: {
+              slope_acceleration: `forward velocity MUST accelerate moderately on downhill sections from BASE_SLIDE_SPEED (7.0) up to MAX_SLIDE_SPEED (14.0)`,
+              jump_handling:      `jumping MUST apply JUMP_FORCE upward, transitioning avatar to airborne state`,
+              constant_gravity:   `when in the air, vertical velocity MUST decrease by GRAVITY every frame until landing or void fall`
+            },
+            constraints: {
+              max_speed_limit: `forward sliding velocity MUST NEVER exceed 14.0 units per second`
+            }
+          },
+          tests: [
+            "catalog.tests.jumpPhysics",
+            "catalog.tests.gravityContinuity",
+            "catalog.tests.speedLimitsConstraint",
+            "catalog.tests.continuousGroundGlide",
+            "catalog.tests.zeroFloorPenetration"
+          ],
+          guards: [
+            "catalog.guards.relative_void_fall_threshold",
+            "catalog.guards.continuous_ground_interpolation",
+            "catalog.guards.box_geometry_center_alignment"
+          ],
+          blueprints: ["catalog.logic.descent_and_air_physics"]
+        },
+
+        particle_trail: {
+          description: `continuous particle emitter producing shrinking cubic voxel particles streaming behind the sliding avatar`,
+          inputs: [`avatar motion`],
+          depends_on: [
+            {
+              feature: `slide_and_air_kinematics`,
+              when: [`emitting from avatar coordinates`]
+            }
+          ],
+          rules: {
+            obligations: {
+              trail_active: `MUST emit cubic particles behind avatar at every frame during motion`,
+              color_shift:  `trail color MUST reflect avatar status: cyan normally, magenta during speed boost, amber when airborne`
+            }
+          },
+          tests: ["catalog.tests.particleTrailActive"],
+          blueprints: ["catalog.logic.cubic_particle_trail"]
+        }
+      }
+    },
+
+    camera: {
+      name: "Slope-Aware Tracking Camera",
+      description: `close-up third-person camera dynamically adjusting altitude and pitch between 45° and 60° based on terrain slope`,
+      features: {
+        follower: {
+          description: `tight, close-up tracking trailing directly behind avatar at 45°-60° angle, adjusting elevation and pitch dynamically based on track slope`,
+          inputs: [`character position update`],
+          depends_on: [
+            {
+              feature: `character.slide_and_air_kinematics`,
+              when: [`targeting avatar position`]
+            }
+          ],
+          rules: {
+            obligations: {
+              pitch_range:      `camera pitch MUST remain between 45° and 60° looking downward toward the avatar`,
+              slope_adaptation: `on steep descents, camera MUST pull back slightly and tilt down to reveal the downhill path ahead`,
+              smooth_lerp:      `camera position and lookAt target MUST interpolate smoothly with zero jitter`
+            },
+            constraints: {
+              close_proximity: `camera distance behind avatar MUST NEVER exceed 6.5 units, and camera height MUST NEVER exceed 5.0 units to guarantee a close, immersive viewpoint`,
+              anti_jitter:     `MUST NEVER execute secondary distance checks that conditionally re-lerp or snap the camera (e.g. 'if (dist > 6.5)'); camera position MUST interpolate monotonically via CAMERA_LERP as defined in catalog.logic.camera_tracking_algorithm`
+            }
+          },
+          tests: [
+            "catalog.tests.cameraTracking",
+            "catalog.tests.cameraProximityConstraint",
+            "catalog.tests.smoothCameraNoJitter"
+          ],
+          guards: ["catalog.guards.camera_smooth_monotonic_lerp"],
+          blueprints: ["catalog.logic.camera_tracking_algorithm"]
+        }
+      }
+    },
+
+    gameplay: {
+      name: "Interactions, Boosts & Lifecycle",
+      description: `handles boost activations, hazard collisions, suspenseful chronometer HUD, and instant respawn`,
+      features: {
+        boost_effects: {
+          description: `applies speed boost timer, vertical jump boost, and bounded forward/airborne teleporter warp`,
+          inputs: [`avatar touches bonus cube`],
+          depends_on: [
+            {
+              feature: `world.bonus_cubes`,
+              when: [`detecting pickup overlap`]
+            },
+            {
+              feature: `character.slide_and_air_kinematics`,
+              when: [`mutating velocity or position`]
+            },
+            {
+              feature: `audio.sound_engine`,
+              when: [`triggering boost sound effects`]
+            }
+          ],
+          rules: {
+            obligations: {
+              speed_boost:     `speed booster MUST multiply forward speed by BOOST_MULTIPLIER for BOOST_DURATION seconds`,
+              jump_boost:      `jump booster MUST launch avatar vertically with SUPER_JUMP_FORCE`,
+              teleporter_warp: `teleporter cube MUST advance avatar Z position by WARP_FORWARD_DISTANCE and add WARP_ALTITUDE_BOOST, subjecting it immediately to gravity`
+            },
+            constraints: {
+              warp_radius_bound: `the teleporter warp MUST NEVER displace the avatar forward by more than 10.0 units along the track, acting as a bounded tactical leap across obstacles rather than skipping level sections`
+            }
+          },
+          tests: [
+            "catalog.tests.speedBoostEffect",
+            "catalog.tests.jumpBoostEffect",
+            "catalog.tests.teleportRadiusBounded"
+          ],
+          blueprints: ["catalog.logic.boost_mechanics"]
+        },
+
+        suspense_hud: {
+          description: `minimalist digital chronometer displaying elapsed time with high precision, deliberately omitting any progress bar to preserve suspense`,
+          inputs: [`frame tick`],
+          rules: {
+            obligations: {
+              chronometer: `MUST display an elapsed time timer in seconds and hundredths (00:00.00) in the corner of the screen`
+            },
+            constraints: {
+              no_progress_bar: `MUST NOT display a progress bar, distance-to-finish gauge, or completion percentage in order to maintain maximum suspense`
+            }
+          },
+          tests: ["catalog.tests.suspenseHudRule"]
+        },
+
+        stage_lifecycle: {
+          description: `manages game states: READY, SLIDING, CRASHED, CLEARED, with instant restart`,
+          inputs: [`collision trigger`, `finish line trigger`, `player restart action`],
+          depends_on: [
+            {
+              feature: `audio.sound_engine`,
+              when: [`triggering crash or victory fanfare`]
+            }
+          ],
+          rules: {
+            obligations: {
+              finish_line:        `crossing the finish line gate MUST trigger victory state and display final completion time`,
+              start_action:       `when in READY state, pressing ArrowUp on keyboard or tapping the screen MUST start the run and transition to SLIDING`,
+              start_grounded:     `starting a run using ArrowUp or touch MUST start the avatar sliding on the track, and MUST NOT trigger an airborne jump on the start frame`,
+              overlay_visibility: `the start/title overlay MUST BE completely hidden (display: 'none' or opacity: 0) while in SLIDING state, and only shown during READY, CRASHED, or CLEARED states`,
+              instant_restart:    `pressing ArrowUp or tapping the screen after crash/win MUST immediately reset avatar and bonus cubes with zero lag`
+            }
+          },
+          tests: ["catalog.tests.overlayVisibilityRule"],
+          guards: [
+            "catalog.guards.start_grounded_input_isolation",
+            "catalog.guards.overlay_lifecycle_visibility"
+          ]
+        }
+      }
+    },
+
+    controls: {
+      name: "Ultra-Minimalist Controls",
+      description: `strict 3-arrow-key mapping for desktop and clean two-zone screen touch for mobile with zero extraneous key bindings`,
+      features: {
+        input_handler: {
+          description: `pure directional controls restricted strictly to ArrowLeft, ArrowRight, and ArrowUp on keyboard, and left/right touch zones on mobile`,
+          inputs: [`keydown / keyup`, `touchstart / touchend`],
+          depends_on: [
+            {
+              feature: `character.slide_and_air_kinematics`,
+              when: [`applying steering and jump triggers`]
+            },
+            {
+              feature: `audio.sound_engine`,
+              when: [`triggering jump audio on jump action`]
+            }
+          ],
+          rules: {
+            obligations: {
+              arrow_keys:         `MUST bind 'ArrowLeft' to steer left, 'ArrowRight' to steer right, and 'ArrowUp' to jump`,
+              split_screen_touch: `MUST map touches on left half of screen to steering left, right half to steering right, and upward swipe or two-finger tap to jump`,
+              start_and_restart:  `in READY, CRASHED, or CLEARED state, pressing ArrowUp on keyboard or tapping the screen MUST start or restart the game immediately`
+            },
+            constraints: {
+              strict_three_keys:  `MUST ONLY listen to and bind the 3 arrow keys: 'ArrowLeft', 'ArrowRight', and 'ArrowUp'. MUST NEVER bind or register 'Space', 'KeyA', 'KeyD', 'KeyW', 'KeyS', 'KeyR', or any other keyboard keys.`
+            }
+          },
+          tests: [
+            "catalog.tests.touchInputMapping",
+            "catalog.tests.strictThreeKeysOnly"
+          ],
+          guards: ["catalog.guards.start_grounded_input_isolation"]
+        }
+      }
+    }
+  }
+}
