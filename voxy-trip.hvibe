@@ -31,6 +31,10 @@
       const COLOR_NEON_AMBER = 0xffaa00     // Start/HUD accents
       const COLOR_AVATAR = 0x00ffff
 
+      // Track & Grid dimensions
+      const TRACK_WIDTH = 12                // Standard track grid width (W)
+      const W = 12
+
       // Performance & Course tuning
       const MIN_OBSTACLE_SPACING_ROWS = 10  // At least 10 clear rows between obstacle lines
       const ACTIVE_WINDOW_BACK = 15.0       // Z units kept behind avatar
@@ -156,7 +160,8 @@
       nonHazardousNeonRule:     `glowing neon emissive materials MUST BE strictly reserved for bonus cubes (IDs 5, 6, 7), while obstacles (IDs 3, 4) MUST BE strictly non-emissive matte canyon rock or dark basalt`,
       renderingOptimizationRule:`the renderer MUST use InstancedMesh grouping, restrict updates to an active Z window, and limit shadow map budget to 1024x1024`,
       declarativeLevelConfig:   `the track data MUST BE structured as an explicit declarative LEVEL_CONFIG object cleanly decoupled from rendering`,
-      standaloneBundle:         `the final web deliverable MUST BE a single self-contained HTML document`
+      standaloneBundle:         `the deliverable MUST BE a single HTML document loading Three.js via standard CDN script tag (https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js), with 100% inline CSS and algorithmic audio (zero external media files)`,
+      noMockThreeRule:          `the generator MUST NEVER attempt to reimplement, stub, or mock Three.js or WebGL by hand, but MUST strictly include the official Three.js r128 CDN script tag in the HTML head`
     }
   },
 
@@ -169,10 +174,16 @@
           inputs: [`code generation`],
           rules: {
             obligations: {
-              self_contained: `MUST produce a single self-contained HTML file with inline CSS, embedded Three.js script, algorithmic audio synthesis, and zero external asset requests`
+              self_contained: `MUST produce a single HTML file with inline CSS, official Three.js loaded via standard CDN script tag (https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js), purely procedural Web Audio, and zero external media files (no external PNG, MP3, WAV, or GLTF)`
+            },
+            constraints: {
+              no_mock_three: `the generator MUST NEVER attempt to reimplement, stub, or recreate a custom WebGL/Three.js engine by hand, and MUST NEVER inline 600KB of raw library code; it MUST strictly include the official Three.js r128 CDN script tag in the HTML head`
             }
           },
-          tests: ["catalog.tests.standaloneBundle"]
+          tests: [
+            "catalog.tests.standaloneBundle",
+            "catalog.tests.noMockThreeRule"
+          ]
         }
       }
     },
