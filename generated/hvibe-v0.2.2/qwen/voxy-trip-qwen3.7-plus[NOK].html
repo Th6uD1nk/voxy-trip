@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Voxy Trip</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; touch-action: none; user-select: none; -webkit-user-select: none; }
+body { overflow: hidden; background: #1a0b2e; font-family: 'Courier New', Courier, monospace; }
+#canvas-container { width: 100vw; height: 100vh; display: block; }
+#hud {
+position: absolute; top: 20px; left: 20px; color: #00f3ff; font-size: 24px; font-weight: bold;
+text-shadow: 0 0 10px #00f3ff; pointer-events: none; z-index: 10;
+}
+#overlay {
+position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+background: rgba(10, 5, 20, 0.85); display: flex; flex-direction: column;
+align-items: center; justify-content: center; z-index: 20; color: #ffaa00;
+text-align: center; transition: opacity 0.3s;
+}
+#overlay.hidden { display: none; }
+#overlay h1 { font-size: 48px; margin-bottom: 20px; text-shadow: 0 0 15px #ffaa00; }
+#overlay p { font-size: 18px; margin-bottom: 30px; color: #ffffff; }
+#overlay .blink { animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+#touch-zones {
+position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+display: flex; z-index: 5; pointer-events: auto;
+}
+.touch-zone { flex: 1; }
+</style>
+</head>
+<body>
+<div id="canvas-container"></div>
+<div id="hud">TIME: <span id="chronometer">00:00.00</span></div>
+<div id="overlay">
+<h1 id="overlay-title">VOXY TRIP</h1>
+<p id="overlay-msg">Arrow UP or TAP to Start<br>Arrow LEFT / RIGHT to Steer</p>
+<p class="blink">PRESS ARROW UP OR TAP</p>
+</div>
+<div id="touch-zones">
+<div class="touch-zone" id="zone-left"></div>
+<div class="touch-zone" id="zone-right"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ==========================================
+// GLOBALS
+// ==========================================
+const VOXEL_SIZE = 1.0;
+const GRAVITY = 16.0;
+const BASE_SLIDE_SPEED = 7.0;
+const MAX_SLIDE_SPEED = 14.0;
+const JUMP_FORCE = 6.5;
+const SUPER_JUMP_FORCE = 12.0;
+const BOOST_MULTIPLIER = 1.35;
+const BOOST_DURATION = 2.0;
+const WARP_FORWARD_DISTANCE = 10.0;
+const WARP_ALTITUDE_BOOST = 3.5;
+const STEER_SPEED = 13.0;
+const STEER_DAMPING = 0.86;
+const CAMERA_DISTANCE = 5.5;
+const CAMERA_HEIGHT = 4.2;
+const CAMERA_LERP = 0.1;
+
+const COLOR_CANYON_SAND = 0xd97736;
+const COLOR_CANYON_ROCK = 0x8b3a1a;
+const COLOR_NEON_CYAN = 0x00f3ff;
+const COLOR_NEON_LIME = 0x39ff14;
+const COLOR_NEON_MAGENTA = 0xff007f;
+const COLOR_NEON_AMBER = 0xffaa00;
+const COLOR_AVATAR = 0x00ffff;
+
+const TRACK_WIDTH = 12;
+const W = 12;
+const MIN_OBSTACLE_SPACING_ROWS = 10;
+const ACTIVE_WINDOW_BACK = 15.0;
+const ACTIVE_WINDOW_FRONT = 85.0;
+
+const SURFACE_Y_OFFSET = 0.5;
+const BONUS_FLOAT_OFFSET = 1.3;
+const OBSTACLE_CENTER_OFFSET = 1.0;
+
+// ==========================================
+// LEVEL CONFIGURATION (Portable Format)
+// ==========================================
+const LEVEL_CONFIG = {
+name: "Neon Canyon Descent",
+width: 12,
+total_rows: 360,
+slope_profile: [],
+grid: []
+};
+
+function getGroundY(r) {
+if (r < 0) return 0;
+if (r < 70) return -r * 0.1;
+if (r < 150) return -7.0 - (r - 70) * 0.15;
+if (r < 230) return -19.0 - (r - 150) * 0.2;
+if (r < 290) return -35.0;
+return -35.0 - (r - 290) * 0.3;
+}
+
+function generateLevelConfig() {
+for (let r = 0; r < LEVEL_CONFIG.total_rows; r++) {
+LEVEL_CONFIG.slope_profile.push(getGroundY(r));
+const row = new Array(W).fill(1); // Default floor
+
+if (r === 0) {
+row[5] = 8; row[6] = 8; // Start gate
+} else if (r === LEVEL_CONFIG.total_rows - 1) {
+row.fill(9); // Finish gate
+} else if (r < 70) {
+if (r === 30) { row[5] = 5; row[6] = 5; } // Speed booster
+} else if (r < 150) {
+// Narrow canyon (cols 3-8)
+for (let c = 0; c < W; c++) {
+if (c < 3 || c > 8) row[c] = 0; // Void outside
+}
+if (r % 15 === 0 && r > 80) {
+const obsCol = 4 + Math.floor(Math.random() * 2);
+row[obsCol] = 3; // Rock boulder
+}
+} else if (r < 230) {
+// Minefield alley
+if (r % 12 === 0) {
+const col1 = 2 + Math.floor(Math.random() * 3);
+let col2 = 7 + Math.floor(Math.random() * 3);
+if (col1 === col2) col2 = (col2 + 1) % W;
+row[col1] = Math.random() > 0.5 ? 5 : 4; // Speed or mine
+row[col2] = Math.random() > 0.5 ? 5 : 4;
+}
+} else if (r < 290) {
+// Great Abyss Leap
+if (r >= 240 && r <= 280) {
+row.fill(0); // Void
+if (r === 235) { row[5] = 7; row[6] = 7; } // Warp teleporter before gap
+}
+} else {
+// Final sprint
+if (r % 10 === 0 && r < 350) {
+row[4] = 6; row[7] = 6; // Jump boosters
+row[5] = 4; row[6] = 4; // Mines in middle
+}
+}
+LEVEL_CONFIG.grid.push(row);
+}
+}
+generateLevelConfig();
+
+// ==========================================
+// STATE & VARIABLES
+// ==========================================
+let gameState = 'READY'; // READY, SLIDING, CRASHED, CLEARED
+let startTime = 0;
+let elapsedTime = 0;
+
+const avatar = {
+x: 5.5, y: 0, z: 0,
+vx: 0, vy: 0, vz: BASE_SLIDE_SPEED,
+grounded: false,
+speedMultiplier: 1,
+boostTimer: 0
+};
+
+const input = { left: false, right: false, jump: false };
+
+let scene, camera, renderer, clock;
+let avatarMesh, particleSystem;
+let chunks = [];
+let audioCtx, glideNode, glideFilter, glideGain;
+
+// ==========================================
+// AUDIO SYNTHESIS
+// ==========================================
+function initAudio() {
+if (audioCtx) return;
+audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+// Glide wind setup
+const bufferSize = audioCtx.sampleRate * 2;
+const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+const data = buffer.getChannelData(0);
+for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+
+glideNode = audioCtx.createBufferSource();
+glideNode.buffer = buffer;
+glideNode.loop = true;
+glideFilter = audioCtx.createBiquadFilter();
+glideFilter.type = 'bandpass';
+glideFilter.frequency.value = 400;
+glideGain = audioCtx.createGain();
+glideGain.gain.value = 0.05;
+
+glideNode.connect(glideFilter);
+glideFilter.connect(glideGain);
+glideGain.connect(audioCtx.destination);
+glideNode.start();
+}
+
+function playSound(type) {
+if (!audioCtx) return;
+const t = audioCtx.currentTime;
+
+if (type === 'jump') {
+const osc = audioCtx.createOscillator();
+const gain = audioCtx.createGain();
+osc.type = 'sine';
+osc.frequency.setValueAtTime(200, t);
+osc.frequency.exponentialRampToValueAtTime(650, t + 0.12);
+gain.gain.setValueAtTime(0.3, t);
+gain.gain.exponentialRampToValueAtTime(0.01, t + 0.12);
+osc.connect(gain);
+gain.connect(audioCtx.destination);
+osc.start(t);
+osc.stop(t + 0.12);
+} else if (type === 'boost') {
+const osc1 = audioCtx.createOscillator();
+const osc2 = audioCtx.createOscillator();
+const gain = audioCtx.createGain();
+osc1.type = 'triangle'; osc1.frequency.value = 440;
+osc2.type = 'triangle'; osc2.frequency.value = 880;
+gain.gain.setValueAtTime(0.2, t);
+gain.gain.exponentialRampToValueAtTime(0.01, t + 0.25);
+osc1.connect(gain); osc2.connect(gain);
+gain.connect(audioCtx.destination);
+osc1.start(t); osc2.start(t);
+osc1.stop(t + 0.25); osc2.stop(t + 0.25);
+} else if (type === 'warp') {
+const osc = audioCtx.createOscillator();
+const gain = audioCtx.createGain();
+osc.type = 'sawtooth';
+osc.frequency.setValueAtTime(800, t);
+osc.frequency.exponentialRampToValueAtTime(200, t + 0.3);
+gain.gain.setValueAtTime(0.2, t);
+gain.gain.exponentialRampToValueAtTime(0.01, t + 0.3);
+osc.connect(gain); gain.connect(audioCtx.destination);
+osc.start(t); osc.stop(t + 0.3);
+} else if (type === 'explosion') {
+const bufferSize = audioCtx.sampleRate * 0.4;
+const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+const data = buffer.getChannelData(0);
+for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+const noise = audioCtx.createBufferSource();
+noise.buffer = buffer;
+const filter = audioCtx.createBiquadFilter();
+filter.type = 'lowpass';
+filter.frequency.setValueAtTime(1000, t);
+filter.frequency.exponentialRampToValueAtTime(80, t + 0.4);
+const gain = audioCtx.createGain();
+gain.gain.setValueAtTime(0.5, t);
+gain.gain.exponentialRampToValueAtTime(0.01, t + 0.4);
+noise.connect(filter); filter.connect(gain); gain.connect(audioCtx.destination);
+noise.start(t);
+} else if (type === 'victory') {
+const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
+notes.forEach((freq, i) => {
+const osc = audioCtx.createOscillator();
+const gain = audioCtx.createGain();
+osc.type = 'square';
+osc.frequency.value = freq;
+const startT = t + i * 0.15;
+gain.gain.setValueAtTime(0.15, startT);
+gain.gain.exponentialRampToValueAtTime(0.01, startT + 0.4);
+const filter = audioCtx.createBiquadFilter();
+filter.type = 'lowpass';
+filter.frequency.value = 2000;
+osc.connect(filter); filter.connect(gain); gain.connect(audioCtx.destination);
+osc.start(startT);
+osc.stop(startT + 0.4);
+});
+}
+}
+
+function updateGlideAudio(speed) {
+if (!glideFilter) return;
+const norm = Math.max(0, Math.min(1, (speed - BASE_SLIDE_SPEED) / (MAX_SLIDE_SPEED - BASE_SLIDE_SPEED)));
+glideFilter.frequency.value = 400 + norm * 1400;
+glideGain.gain.value = gameState === 'SLIDING' ? 0.05 + norm * 0.1 : 0;
+}
+
+// ==========================================
+// WORLD GENERATION
+// ==========================================
+function createWorld() {
+scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a0b2e);
+scene.fog = new THREE.Fog(0x1a0b2e, 20, 90);
+
+camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
+
+renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+// Lighting
+const ambientLight = new THREE.AmbientLight(0x404060, 0.6);
+scene.add(ambientLight);
+
+const dirLight = new THREE.DirectionalLight(0xffaa00, 0.8);
+dirLight.position.set(10, 20, 10);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.width = 1024;
+dirLight.shadow.mapSize.height = 1024;
+dirLight.shadow.camera.near = 0.5;
+dirLight.shadow.camera.far = 50;
+dirLight.shadow.camera.left = -15;
+dirLight.shadow.camera.right = 15;
+dirLight.shadow.camera.top = 15;
+dirLight.shadow.camera.bottom = -15;
+scene.add(dirLight);
+
+// Chunked Instanced Meshes
+const chunkSize = 30;
+const numChunks = Math.ceil(LEVEL_CONFIG.total_rows / chunkSize);
+
+const floorGeo = new THREE.BoxGeometry(1, 1, 1);
+const floorMat = new THREE.MeshStandardMaterial({ color: COLOR_CANYON_SAND, roughness: 0.9 });
+
+const obstacleGeo = new THREE.BoxGeometry(1, 1, 1);
+const obstacleMat = new THREE.MeshStandardMaterial({ color: COLOR_CANYON_ROCK, roughness: 1.0, metalness: 0.0 });
+const mineMat = new THREE.MeshStandardMaterial({ color: 0x221111, roughness: 1.0, metalness: 0.0 });
+
+const bonusGeo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
+const bonusCyanMat = new THREE.MeshStandardMaterial({ color: COLOR_NEON_CYAN, emissive: COLOR_NEON_CYAN, emissiveIntensity: 0.8 });
+const bonusLimeMat = new THREE.MeshStandardMaterial({ color: COLOR_NEON_LIME, emissive: COLOR_NEON_LIME, emissiveIntensity: 0.8 });
+const bonusMagentaMat = new THREE.MeshStandardMaterial({ color: COLOR_NEON_MAGENTA, emissive: COLOR_NEON_MAGENTA, emissiveIntensity: 0.8 });
+
+const dummy = new THREE.Object3D();
+
+for (let c = 0; c < numChunks; c++) {
+const startRow = c * chunkSize;
+const endRow = Math.min(startRow + chunkSize, LEVEL_CONFIG.total_rows);
+const rowCount = endRow - startRow;
+
+const floorMesh = new THREE.InstancedMesh(floorGeo, floorMat, rowCount * W);
+floorMesh.frustumCulled = false;
+floorMesh.castShadow = false;
+floorMesh.receiveShadow = true;
+
+const obstacleMesh = new THREE.InstancedMesh(obstacleGeo, obstacleMat, rowCount * W);
+obstacleMesh.frustumCulled = false;
+obstacleMesh.castShadow = true;
+obstacleMesh.receiveShadow = true;
+
+const bonusMesh = new THREE.InstancedMesh(bonusGeo, bonusCyanMat, rowCount * W);
+bonusMesh.frustumCulled = false;
+bonusMesh.castShadow = false;
+
+let fIdx = 0, oIdx = 0, bIdx = 0;
+const bonusMatrices = []; // Store for animation
+
+for (let r = startRow; r < endRow; r++) {
+const gy = getGroundY(r);
+for (let x = 0; x < W; x++) {
+const tile = LEVEL_CONFIG.grid[r][x];
+if (tile === 0) continue;
+
+if (tile === 1 || tile === 2 || tile === 8 || tile === 9) {
+dummy.position.set(x, gy, r);
+dummy.updateMatrix();
+floorMesh.setMatrixAt(fIdx++, dummy.matrix);
+} else if (tile === 3 || tile === 4) {
+dummy.position.set(x, gy, r);
+dummy.updateMatrix();
+floorMesh.setMatrixAt(fIdx++, dummy.matrix); // Floor under obstacle
+
+dummy.position.set(x, gy + OBSTACLE_CENTER_OFFSET, r);
+dummy.updateMatrix();
+obstacleMesh.setMatrixAt(oIdx, dummy.matrix);
+obstacleMesh.setColorAt(oIdx, tile === 3 ? new THREE.Color(COLOR_CANYON_ROCK) : new THREE.Color(0x221111));
+oIdx++;
+} else if (tile === 5 || tile === 6 || tile === 7) {
+dummy.position.set(x, gy, r);
+dummy.updateMatrix();
+floorMesh.setMatrixAt(fIdx++, dummy.matrix); // Floor under bonus
+
+dummy.position.set(x, gy + BONUS_FLOAT_OFFSET, r);
+dummy.rotation.set(0, 0, 0);
+dummy.updateMatrix();
+bonusMesh.setMatrixAt(bIdx, dummy.matrix);
+
+let mat = bonusCyanMat;
+if (tile === 6) mat = bonusLimeMat;
+if (tile === 7) mat = bonusMagentaMat;
+bonusMesh.material = mat; // Simplified: in real app, use multiple instanced meshes per type or color array
+
+bonusMatrices.push({ idx: bIdx, r: r, x: x, type: tile, active: true });
+bIdx++;
+}
+}
+}
+
+floorMesh.count = fIdx;
+obstacleMesh.count = oIdx;
+bonusMesh.count = bIdx;
+obstacleMesh.instanceColor.needsUpdate = true;
+
+scene.add(floorMesh);
+scene.add(obstacleMesh);
+scene.add(bonusMesh);
+
+chunks.push({
+zMin: startRow,
+zMax: endRow,
+floorMesh,
+obstacleMesh,
+bonusMesh,
+bonusMatrices
+});
+}
+
+// Avatar Mesh
+const avatarGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6);
+const avatarMat = new THREE.MeshStandardMaterial({ color: COLOR_AVATAR, emissive: COLOR_AVATAR, emissiveIntensity: 0.5 });
+avatarMesh = new THREE.Mesh(avatarGeo, avatarMat);
+avatarMesh.castShadow = true;
+scene.add(avatarMesh);
+
+// Particle System
+const particleCount = 200;
+const pGeo = new THREE.BoxGeometry(0.2, 0.2, 0.2);
+const pMat = new THREE.MeshBasicMaterial({ color: COLOR_NEON_CYAN, transparent: true, opacity: 0.8 });
+particleSystem = new THREE.InstancedMesh(pGeo, pMat, particleCount);
+particleSystem.frustumCulled = false;
+scene.add(particleSystem);
+
+window.particles = [];
+for (let i = 0; i < particleCount; i++) {
+window.particles.push({ active: false, x:0, y:0, z:0, vx:0, vy:0, vz:0, life:0, dummy: new THREE.Object3D() });
+}
+}
+
+// ==========================================
+// INPUT HANDLING
+// ==========================================
+function handleStartAction() {
+if (gameState === 'READY' || gameState === 'CRASHED' || gameState === 'CLEARED') {
+resetGame();
+gameState = 'SLIDING';
+startTime = performance.now();
+document.getElementById('overlay').classList.add('hidden');
+initAudio();
+return true;
+}
+return false;
+}
+
+window.addEventListener('keydown', (e) => {
+if (e.code === 'ArrowLeft') { input.left = true; e.preventDefault(); }
+else if (e.code === 'ArrowRight') { input.right = true; e.preventDefault(); }
+else if (e.code === 'ArrowUp') {
+e.preventDefault();
+if (!handleStartAction() && gameState === 'SLIDING' && avatar.grounded) {
+avatar.vy = JUMP_FORCE;
+avatar.grounded = false;
+playSound('jump');
+}
+}
+});
+
+window.addEventListener('keyup', (e) => {
+if (e.code === 'ArrowLeft') input.left = false;
+else if (e.code === 'ArrowRight') input.right = false;
+});
+
+const zoneLeft = document.getElementById('zone-left');
+const zoneRight = document.getElementById('zone-right');
+
+zoneLeft.addEventListener('touchstart', (e) => { e.preventDefault(); if(!handleStartAction()) input.left = true; });
+zoneLeft.addEventListener('touchend', (e) => { e.preventDefault(); input.left = false; });
+zoneRight.addEventListener('touchstart', (e) => { e.preventDefault(); if(!handleStartAction()) input.right = true; });
+zoneRight.addEventListener('touchend', (e) => { e.preventDefault(); input.right = false; });
+
+window.addEventListener('touchstart', (e) => {
+if (e.touches.length >= 2) {
+e.preventDefault();
+if (!handleStartAction() && gameState === 'SLIDING' && avatar.grounded) {
+avatar.vy = JUMP_FORCE;
+avatar.grounded = false;
+playSound('jump');
+}
+}
+});
+
+// ==========================================
+// PHYSICS & GAME LOGIC
+// ==========================================
+function updatePhysics(dt) {
+if (gameState !== 'SLIDING') return;
+
+// Steering
+if (input.left) avatar.vx -= STEER_SPEED * dt;
+if (input.right) avatar.vx += STEER_SPEED * dt;
+avatar.vx *= STEER_DAMPING;
+avatar.x += avatar.vx * dt;
+
+// Clamp X to track bounds
+avatar.x = Math.max(0.5, Math.min(W - 0.5, avatar.x));
+
+// Forward speed
+let targetSpeed = BASE_SLIDE_SPEED;
+const r = Math.floor(avatar.z);
+const slope = r > 0 ? getGroundY(r) - getGroundY(r - 1) : 0;
+if (slope < 0) targetSpeed += Math.abs(slope) * 10; // Accelerate downhill
+
+if (avatar.boostTimer > 0) {
+targetSpeed *= BOOST_MULTIPLIER;
+avatar.boostTimer -= dt;
+}
+
+avatar.vz = Math.min(targetSpeed, MAX_SLIDE_SPEED);
+avatar.z += avatar.vz * dt;
+
+// Continuous Ground Interpolation
+const currR = Math.floor(avatar.z / VOXEL_SIZE);
+const frac = (avatar.z / VOXEL_SIZE) - currR;
+const current_ground_y = (1.0 - frac) * getGroundY(currR) + frac * getGroundY(currR + 1);
+const current_surface_y = current_ground_y + SURFACE_Y_OFFSET;
+
+// Gravity & Landing
+if (!avatar.grounded) {
+avatar.vy -= GRAVITY * dt;
+avatar.y += avatar.vy * dt;
+
+// Check if landed
+const tileBelow = (currR >= 0 && currR < LEVEL_CONFIG.total_rows) ? LEVEL_CONFIG.grid[currR][Math.round(avatar.x)] : 1;
+if (tileBelow !== 0 && avatar.y <= current_surface_y) {
+avatar.y = current_surface_y;
+avatar.vy = 0;
+avatar.grounded = true;
+}
+} else {
+avatar.y = current_surface_y;
+const tileBelow = (currR >= 0 && currR < LEVEL_CONFIG.total_rows) ? LEVEL_CONFIG.grid[currR][Math.round(avatar.x)] : 1;
+if (tileBelow === 0) {
+avatar.grounded = false; // Dropped into pit
+}
+}
+
+// Void fall check (relative threshold)
+if (avatar.y < current_ground_y - 12.0) {
+crashGame();
+}
+
+// Collision & Bonus Check
+checkCollisions(currR);
+
+// Update Audio
+updateGlideAudio(avatar.vz);
+
+// Update Particles
+updateParticles(dt);
+}
+
+function checkCollisions(currR) {
+// Check obstacles and bonuses in current and next row
+for (let r = Math.max(0, currR - 1); r <= Math.min(LEVEL_CONFIG.total_rows - 1, currR + 1); r++) {
+for (let x = 0; x < W; x++) {
+const tile = LEVEL_CONFIG.grid[r][x];
+if (tile === 3 || tile === 4) {
+// Obstacle collision (3D vertical clearance check)
+const obsY = getGroundY(r) + OBSTACLE_CENTER_OFFSET;
+if (Math.abs(avatar.x - x) < 0.7 && Math.abs(avatar.z - r) < 0.7) {
+if (avatar.y < obsY + 0.8) {
+if (tile === 4) playSound('explosion');
+crashGame();
+return;
+}
+}
+} else if (tile >= 5 && tile <= 7) {
+// Bonus collection
+if (Math.abs(avatar.x - x) < 0.8 && Math.abs(avatar.z - r) < 0.8) {
+// Find and deactivate in chunk
+for (const chunk of chunks) {
+if (r >= chunk.zMin && r < chunk.zMax) {
+for (const bm of chunk.bonusMatrices) {
+if (bm.r === r && bm.x === x && bm.active) {
+bm.active = false;
+const dummy = new THREE.Object3D();
+dummy.position.set(0, -100, 0); // Move away
+dummy.updateMatrix();
+chunk.bonusMesh.setMatrixAt(bm.idx, dummy.matrix);
+chunk.bonusMesh.instanceMatrix.needsUpdate = true;
+
+if (tile === 5) { avatar.boostTimer = BOOST_DURATION; playSound('boost'); }
+else if (tile === 6) { avatar.vy = SUPER_JUMP_FORCE; avatar.grounded = false; playSound('jump'); }
+else if (tile === 7) {
+avatar.z += WARP_FORWARD_DISTANCE;
+avatar.y += WARP_ALTITUDE_BOOST;
+avatar.grounded = false;
+playSound('warp');
+}
+LEVEL_CONFIG.grid[r][x] = 1; // Remove from logical grid
+return;
+}
+}
+}
+}
+}
+} else if (tile === 9) {
+if (Math.abs(avatar.z - r) < 0.5) {
+winGame();
+}
+}
+}
+}
+}
+
+function updateParticles(dt) {
+if (gameState !== 'SLIDING') return;
+
+// Emit new particle
+if (Math.random() < 0.3) {
+const p = window.particles.find(p => !p.active);
+if (p) {
+p.active = true;
+p.x = avatar.x + (Math.random() - 0.5) * 0.4;
+p.y = avatar.y - 0.3;
+p.z = avatar.z - 0.5;
+p.vx = (Math.random() - 0.5) * 2;
+p.vy = Math.random() * 2;
+p.vz = -avatar.vz * 0.5;
+p.life = 0.6;
+
+// Color shift based on state
+let color = COLOR_NEON_CYAN;
+if (avatar.boostTimer > 0) color = COLOR_NEON_MAGENTA;
+else if (!avatar.grounded) color = COLOR_NEON_AMBER;
+particleSystem.setColorAt(window.particles.indexOf(p), new THREE.Color(color));
+}
+}
+
+// Update active particles
+const dummy = new THREE.Object3D();
+let activeCount = 0;
+for (const p of window.particles) {
+if (p.active) {
+p.life -= dt;
+if (p.life <= 0) {
+p.active = false;
+dummy.position.set(0, -100, 0);
+} else {
+p.x += p.vx * dt;
+p.y += p.vy * dt;
+p.z += p.vz * dt;
+p.vy -= GRAVITY * 0.5 * dt;
+const scale = p.life / 0.6;
+dummy.position.set(p.x, p.y, p.z);
+dummy.scale.set(scale, scale, scale);
+dummy.updateMatrix();
+}
+particleSystem.setMatrixAt(activeCount++, dummy.matrix);
+}
+}
+particleSystem.count = activeCount;
+particleSystem.instanceMatrix.needsUpdate = true;
+if (particleSystem.instanceColor) particleSystem.instanceColor.needsUpdate = true;
+}
+
+// ==========================================
+// CAMERA TRACKING
+// ==========================================
+function updateCamera(dt) {
+const target_height = CAMERA_HEIGHT;
+const target_distance = CAMERA_DISTANCE;
+
+const cam_target_x = avatar.x;
+const cam_target_y = avatar.y + target_height;
+const cam_target_z = avatar.z - target_distance;
+
+camera.position.x += (cam_target_x - camera.position.x) * CAMERA_LERP;
+camera.position.y += (cam_target_y - camera.position.y) * CAMERA_LERP;
+camera.position.z += (cam_target_z - camera.position.z) * CAMERA_LERP;
+
+camera.lookAt(avatar.x, avatar.y + 0.35, avatar.z + 1.5);
+}
+
+// ==========================================
+// RENDER LOOP & CHUNK MANAGEMENT
+// ==========================================
+function animate() {
+requestAnimationFrame(animate);
+
+const dt = Math.min(clock.getDelta(), 0.05);
+
+if (gameState === 'SLIDING') {
+elapsedTime = (performance.now() - startTime) / 1000;
+const mins = Math.floor(elapsedTime / 60).toString().padStart(2, '0');
+const secs = Math.floor(elapsedTime % 60).toString().padStart(2, '0');
+const ms = Math.floor((elapsedTime % 1) * 100).toString().padStart(2, '0');
+document.getElementById('chronometer').textContent = `${mins}:${secs}.${ms}`;
+}
+
+updatePhysics(dt);
+updateCamera(dt);
+
+// Chunk visibility culling
+for (const chunk of chunks) {
+const isVisible = (avatar.z + ACTIVE_WINDOW_FRONT >= chunk.zMin) && (avatar.z - ACTIVE_WINDOW_BACK <= chunk.zMax);
+chunk.floorMesh.visible = isVisible;
+chunk.obstacleMesh.visible = isVisible;
+chunk.bonusMesh.visible = isVisible;
+
+// Local rotation for bonus cubes
+if (isVisible) {
+const dummy = new THREE.Object3D();
+let updated = false;
+for (const bm of chunk.bonusMatrices) {
+if (bm.active) {
+chunk.bonusMesh.getMatrixAt(bm.idx, dummy.matrix);
+dummy.position.setFromMatrixPosition(dummy.matrix);
+dummy.rotation.y += dt * 2.0;
+dummy.updateMatrix();
+chunk.bonusMesh.setMatrixAt(bm.idx, dummy.matrix);
+updated = true;
+}
+}
+if (updated) chunk.bonusMesh.instanceMatrix.needsUpdate = true;
+}
+}
+
+// Update avatar mesh position
+avatarMesh.position.set(avatar.x, avatar.y + 0.3, avatar.z);
+avatarMesh.rotation.z = -avatar.vx * 0.05; // Banking tilt
+avatarMesh.rotation.y = -avatar.vx * 0.02;
+
+renderer.render(scene, camera);
+}
+
+// ==========================================
+// LIFECYCLE MANAGEMENT
+// ==========================================
+function resetGame() {
+avatar.x = 5.5;
+avatar.y = getGroundY(0) + SURFACE_Y_OFFSET;
+avatar.z = 0;
+avatar.vx = 0;
+avatar.vy = 0;
+avatar.vz = BASE_SLIDE_SPEED;
+avatar.grounded = true;
+avatar.speedMultiplier = 1;
+avatar.boostTimer = 0;
+elapsedTime = 0;
+
+// Reset bonuses logically (optional for true restart, but simple reload is safer for full reset)
+// For instant restart, we just reset avatar.
+}
+
+function crashGame() {
+gameState = 'CRASHED';
+playSound('explosion');
+updateGlideAudio(0);
+document.getElementById('overlay-title').textContent = 'CRASHED';
+document.getElementById('overlay-msg').innerHTML = `Time: ${document.getElementById('chronometer').textContent}<br>Arrow UP or TAP to Restart`;
+document.getElementById('overlay').classList.remove('hidden');
+}
+
+function winGame() {
+gameState = 'CLEARED';
+playSound('victory');
+updateGlideAudio(0);
+document.getElementById('overlay-title').textContent = 'CLEARED';
+document.getElementById('overlay-msg').innerHTML = `Final Time: ${document.getElementById('chronometer').textContent}<br>Arrow UP or TAP to Restart`;
+document.getElementById('overlay').classList.remove('hidden');
+}
+
+// ==========================================
+// INITIALIZATION
+// ==========================================
+function init() {
+clock = new THREE.Clock();
+createWorld();
+resetGame();
+animate();
+
+window.addEventListener('resize', () => {
+camera.aspect = window.innerWidth / window.innerHeight;
+camera.updateProjectionMatrix();
+renderer.setSize(window.innerWidth, window.innerHeight);
+});
+}
+
+init();
+</script>
+</body>
+</html>
+
